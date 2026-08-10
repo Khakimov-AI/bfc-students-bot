@@ -264,7 +264,15 @@ const STUDENT_STEPS = {
       { text: 'Ajrashgan', value: 'DIVORCED' },
     ],
     sheetCol: null,
-    next: (data) => (data.father_status === 'NORMAL' ? 'father_name' : 'mother_status'),
+    next: (data) => (data.father_status === 'NORMAL' ? 'father_name' : 'father_skip_fill'),
+  },
+  // DEAD/DIVORCED tanlansa, ism/kasb/telefon ustunlariga bir xil
+  // qiymat ("DEAD" yoki "DIVORCED") yoziladi, savol so'ralmaydi.
+  father_skip_fill: {
+    type: 'skip_multi',
+    sheetCols: ['AF', 'AG', 'AH'], // FATHER'S NAME, JOB, PHONE
+    autoValue: (data) => data.father_status,
+    next: () => 'mother_status',
   },
   father_name: {
     type: 'text',
@@ -298,7 +306,13 @@ const STUDENT_STEPS = {
       { text: 'Ajrashgan', value: 'DIVORCED' },
     ],
     sheetCol: null,
-    next: (data) => (data.mother_status === 'NORMAL' ? 'mother_name' : 'address'),
+    next: (data) => (data.mother_status === 'NORMAL' ? 'mother_name' : 'mother_skip_fill'),
+  },
+  mother_skip_fill: {
+    type: 'skip_multi',
+    sheetCols: ['AI', 'AJ', 'AK'], // MOTHER'S NAME, JOB, PHONE
+    autoValue: (data) => data.mother_status,
+    next: () => 'address',
   },
   mother_name: {
     type: 'text',
