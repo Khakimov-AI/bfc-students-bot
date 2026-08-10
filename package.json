@@ -1,0 +1,13 @@
+{
+  "name": "bfc-student-bot",
+  "version": "1.0.0",
+  "description": "BFC Student Intake Telegram Bot",
+  "main": "webhook.js",
+  "scripts": {
+    "start": "node webhook.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "googleapis": "^140.0.0"
+  }
+}
