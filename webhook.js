@@ -32,7 +32,7 @@ const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.STUDENT_BOT_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
 const DRAFT_SHEET = 'DRAFT';
-const DOCUMENTS_LOG_SHEET = 'DOCUMENTS_LOG'; // A:timestamp B:contractId C:docCode D:fileType E:fileId
+const DOCUMENTS_LOG_SHEET = 'DOCUMENT_LOG'; // A:timestamp B:contractId C:docCode D:fileType E:fileId
 
 const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
 const auth = new google.auth.GoogleAuth({
