@@ -22,7 +22,7 @@ const { STUDENT_STEPS, findResumeStep, CURRENT_STEP_COLUMN, FIRST_STEP } = requi
 const {
   getMissingDocs, markDocReceived, isComplete,
   buildDocumentMenuKeyboard, buildBankStatementSubmenu, buildMissingDocsText,
-  sendDocumentToGroup,
+  sendDocumentToGroup, DOCUMENT_TYPES, REQUIRED_DOCS,
 } = require('./documentCollection');
 
 const app = express();
@@ -272,6 +272,20 @@ function answerCallbackQuery(callbackQueryId, text) {
   req.end();
 }
 
+function editMessageReplyMarkup(chatId, messageId, replyMarkup) {
+  const data = JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: replyMarkup });
+  const options = {
+    hostname: 'api.telegram.org',
+    path: `/bot${BOT_TOKEN}/editMessageReplyMarkup`,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+  };
+  const req = https.request(options, (res) => { res.on('data', () => {}); res.on('end', () => {}); });
+  req.on('error', (e) => console.error('editMarkup xato:', e));
+  req.write(data);
+  req.end();
+}
+
 // ---------------------------------------------------------------------
 // TUGMA QURUVCHILAR
 // ---------------------------------------------------------------------
@@ -288,6 +302,39 @@ function buildConfirmSummaryKeyboard() {
       { text: 'Tahrirlash \u270f\ufe0f', callback_data: 'confirm:edit' },
     ]],
   };
+}
+
+// ---------------------------------------------------------------------
+// FUNKSIYA MENYULARI (rol asosida farqlanadi)
+// ---------------------------------------------------------------------
+
+function buildStudentMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '🆕 Boshlash / shartnoma ID', callback_data: 'menu:start' }],
+      [{ text: '📄 Hujjatlar holati', callback_data: 'menu:docs' }],
+    ],
+  };
+}
+
+function buildAdminMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '♻️ Hujjatni qaytarish', callback_data: 'menu:qaytar' }],
+    ],
+  };
+}
+
+function buildAdminDocSelectKeyboard(selectedCodes) {
+  const rows = DOCUMENT_TYPES.map((d) => {
+    const checked = selectedCodes.includes(d.code);
+    return [{ text: `${checked ? '✅' : '⚪️'} ${d.label}`, callback_data: `adret:${d.code}` }];
+  });
+  rows.push([
+    { text: 'Bekor qilish', callback_data: 'adret:cancel' },
+    { text: 'Tayyor ✔️', callback_data: 'adret:confirm' },
+  ]);
+  return { inline_keyboard: rows };
 }
 
 function buildEditFieldKeyboard() {
@@ -421,6 +468,29 @@ app.post('/webhook', async (req, res) => {
     const text = (message.text || '').trim();
     const username = message.from.username || '';
 
+    // --- ADMIN: /qaytar — hujjatlardan birortasi to'g'ri bo'lmasa,
+    // Murodil shu buyruq orqali qaysi hujjat(lar) qayta so'ralishini
+    // belgilaydi. Faqat ADMIN_NOTIFY_CHAT_ID'dan ishlaydi.
+    if (text === '/qaytar') {
+      if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+        await sendMessage(chatId, 'Bu buyruq faqat administrator uchun.');
+        return res.sendStatus(200);
+      }
+      userStates.set(chatId, { mode: 'admin_return_awaiting_id' });
+      await sendMessage(chatId, 'Qaysi talabaning hujjatlarini qaytarish kerak? Shartnoma raqamini kiriting:');
+      return res.sendStatus(200);
+    }
+
+    // --- Funksiya menyusi (rol asosida farqlanadi) ---
+    if (text === '/menu') {
+      if (ADMIN_NOTIFY_CHAT_ID && String(chatId) === String(ADMIN_NOTIFY_CHAT_ID)) {
+        await sendMessage(chatId, 'Admin funksiyalari:', buildAdminMenuKeyboard());
+      } else {
+        await sendMessage(chatId, 'Funksiyalar:', buildStudentMenuKeyboard());
+      }
+      return res.sendStatus(200);
+    }
+
     // --- Admin ID olish uchun texnik buyruq (har doim ishlaydi,
     // sessiyadan qat'iy nazar) ---
     if (text === '/adminid') {
@@ -443,7 +513,18 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // --- Admin oqimi: shartnoma ID kutilmoqda ---
     const session = userStates.get(chatId);
+    if (session && session.mode === 'admin_return_awaiting_id') {
+      const rowNum = await findRowByContractId(text);
+      if (!rowNum) {
+        await sendMessage(chatId, 'Bunday shartnoma topilmadi. Qayta kiriting.');
+        return res.sendStatus(200);
+      }
+      userStates.set(chatId, { mode: 'admin_return_selecting_docs', row: rowNum, contractId: text, selectedCodes: [] });
+      await sendMessage(chatId, 'Qaysi hujjat(lar) qayta so\'ralsin? Tanlang (bir nechtasini belgilash mumkin):', buildAdminDocSelectKeyboard([]));
+      return res.sendStatus(200);
+    }
 
     if (!session) {
       await sendMessage(chatId, 'Sessiya topilmadi. Iltimos /start bosing.');
@@ -601,6 +682,13 @@ async function handleGroupMessage(message) {
   const text = (message.text || '').trim();
   const threadId = message.message_thread_id;
 
+  if (text === '/menu' || text.startsWith('/menu@')) {
+    await sendMessage(chatId, 'Hodimlar uchun funksiyalar:', {
+      inline_keyboard: [[{ text: '📄 Hujjat so\'rash', callback_data: 'groupmenu:hujjat' }]],
+    }, threadId);
+    return;
+  }
+
   if (text === '/hujjat' || text.startsWith('/hujjat@')) {
     const result = await sendMessage(chatId, 'Qaysi talabaning hujjatlari kerak? Shartnoma raqamini SHU XABARGA REPLY qilib yozing.', null, threadId);
     if (result && result.result && result.result.message_id) {
@@ -636,6 +724,110 @@ async function handleCallback(callback) {
   const chatId = callback.message.chat.id;
   const data = callback.data;
   const callbackId = callback.id;
+
+  // --- Guruh menyusi: "Hujjat so'rash" tugmasi ---
+  if (data === 'groupmenu:hujjat') {
+    const groupChatId = callback.message.chat.id;
+    const groupThreadId = callback.message.message_thread_id;
+    answerCallbackQuery(callbackId, '');
+    const result = await sendMessage(groupChatId, 'Qaysi talabaning hujjatlari kerak? Shartnoma raqamini SHU XABARGA REPLY qilib yozing.', null, groupThreadId);
+    if (result && result.result && result.result.message_id) {
+      pendingGroupRequests.set(result.result.message_id, { chatId: groupChatId, threadId: groupThreadId });
+    }
+    return;
+  }
+
+  // --- MENYU tugmalari — sessiyasiz ham ishlashi kerak ---
+  if (data === 'menu:start') {
+    userStates.set(chatId, { mode: 'awaiting_id' });
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, 'Biz bilan qilgan shartnoma raqamingizni kiriting:');
+    return;
+  }
+  if (data === 'menu:docs') {
+    const s = userStates.get(chatId);
+    answerCallbackQuery(callbackId, '');
+    if (!s || !s.row) {
+      await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting (/start).');
+      return;
+    }
+    const rowData = await getRowData(s.row);
+    const missing = getMissingDocs(rowData.AN);
+    await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
+    return;
+  }
+  if (data === 'menu:qaytar') {
+    if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+      answerCallbackQuery(callbackId, 'Ruxsat yo\'q.');
+      return;
+    }
+    userStates.set(chatId, { mode: 'admin_return_awaiting_id' });
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, 'Qaysi talabaning hujjatlarini qaytarish kerak? Shartnoma raqamini kiriting:');
+    return;
+  }
+
+  // --- ADMIN: hujjat tanlash (qaytarish uchun) ---
+  if (data.startsWith('adret:')) {
+    const s = userStates.get(chatId);
+    if (!s || s.mode !== 'admin_return_selecting_docs') {
+      answerCallbackQuery(callbackId, 'Sessiya topilmadi.');
+      return;
+    }
+    const action = data.substring(6);
+
+    if (action === 'cancel') {
+      userStates.delete(chatId);
+      answerCallbackQuery(callbackId, 'Bekor qilindi');
+      await sendMessage(chatId, 'Bekor qilindi.');
+      return;
+    }
+
+    if (action === 'confirm') {
+      if (s.selectedCodes.length === 0) {
+        answerCallbackQuery(callbackId, 'Kamida bitta hujjat tanlang');
+        return;
+      }
+      answerCallbackQuery(callbackId, '');
+
+      const rowData = await getRowData(s.row);
+      const currentMissing = getMissingDocs(rowData.AN);
+      // Tanlangan kodlarni "kam hujjatlar" ro'yxatiga qaytarish
+      // (takrorlanmasin, shuning uchun Set orqali birlashtiriladi)
+      const newMissing = Array.from(new Set([...currentMissing, ...s.selectedCodes]));
+      const cellValue = newMissing.join(', ');
+      await updateCell(`${DRAFT_SHEET}!AN${s.row}`, cellValue);
+      // STATUS'ni qaytarish — eslatma tsikli qayta ishga tushishi uchun
+      await updateCell(`${DRAFT_SHEET}!B${s.row}`, 'MA\'LUMOT TASDIQLANDI');
+
+      const studentChatId = rowData[TELEGRAM_CHAT_ID_COLUMN];
+      if (studentChatId) {
+        const labels = s.selectedCodes.map((code) => {
+          const doc = DOCUMENT_TYPES.find((d) => d.code === code);
+          return `\u2022 ${doc ? doc.label : code}`;
+        }).join('\n');
+        await sendMessage(studentChatId,
+          `Diqqat! Quyidagi hujjat(lar)ni qayta topshirishingiz kerak:\n\n${labels}\n\nIltimos, to'g'ri hujjatni qayta yuboring.`,
+          buildDocumentMenuKeyboard(newMissing));
+      }
+
+      await sendMessage(chatId, `Shartnoma ${s.contractId} uchun ${s.selectedCodes.length} ta hujjat qaytarildi. Talabaga xabar berildi.`);
+      userStates.delete(chatId);
+      return;
+    }
+
+    // Hujjat turi belgilash/bekor qilish (toggle)
+    const idx = s.selectedCodes.indexOf(action);
+    if (idx === -1) s.selectedCodes.push(action);
+    else s.selectedCodes.splice(idx, 1);
+    userStates.set(chatId, s);
+    answerCallbackQuery(callbackId, '');
+    // Tugmalarni yangilash
+    const newKeyboard = buildAdminDocSelectKeyboard(s.selectedCodes);
+    editMessageReplyMarkup(chatId, callback.message.message_id, newKeyboard);
+    return;
+  }
+
   const session = userStates.get(chatId);
 
   if (!session) {
@@ -760,7 +952,7 @@ async function runDocumentReminderTick() {
   reminderTickRunning = true;
   try {
     const { hour, minute, dateKey } = getTashkentHourAndDateKey();
-    const isReminderWindow = (hour === 10 || hour === 17) && minute < 5;
+    const isReminderWindow = (hour === 10 || hour === 16) && minute < 5;
     if (!isReminderWindow) return;
 
     const reminderKey = `${dateKey}-${hour}`;
