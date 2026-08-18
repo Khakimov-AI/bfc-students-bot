@@ -70,6 +70,26 @@ const STUDENT_STEPS = {
       { text: 'Til kursi', value: 'TIL_KURSI' },
     ],
     sheetCol: 'C', // PROGRAM
+    next: () => 'zagran_status',
+  },
+
+  // --- ZAGRAN bor/yo'q (endi ID tasdiqlangandan keyin, ismdan OLDIN) ---
+  zagran_status: {
+    type: 'buttons',
+    question: 'Chet elga chiqish (zagran) pasportingiz bormi?',
+    options: [
+      { text: 'Bor', value: 'BOR' },
+      { text: 'Yo\'q', value: 'YOQ' },
+    ],
+    sheetCol: 'AA', // ZAGRAN
+    next: (data) => (data.zagran_status === 'BOR' ? 'passport_number' : 'full_name_warning'),
+  },
+  passport_number: {
+    type: 'text',
+    question: 'NAMUNA: FB1234567 (bo\'sh joysiz, ketma-ket kiriting)\n\nZagran pasport seriya-raqamingizni kiriting:',
+    validate: validators.passport,
+    errorMsg: 'Format noto\'g\'ri. 2 harf + 7 raqam, bo\'sh joysiz kiriting (masalan: FB1234567).',
+    sheetCol: 'N', // PASSPORT №
     next: () => 'full_name_warning',
   },
 
@@ -87,26 +107,6 @@ const STUDENT_STEPS = {
     validate: validators.fullName,
     errorMsg: 'Namunadagidek to\'liq ism-familyani kiriting.',
     sheetCol: 'E', // FULL NAME
-    next: () => 'zagran_status',
-  },
-
-  // --- ZAGRAN bor/yo'q ---
-  zagran_status: {
-    type: 'buttons',
-    question: 'Chet elga chiqish (zagran) pasportingiz bormi?',
-    options: [
-      { text: 'Bor', value: 'BOR' },
-      { text: 'Yo\'q', value: 'YOQ' },
-    ],
-    sheetCol: 'AA', // ZAGRAN
-    next: (data) => (data.zagran_status === 'BOR' ? 'passport_number' : 'phone'),
-  },
-  passport_number: {
-    type: 'text',
-    question: 'NAMUNA: FB1234567 (bo\'sh joysiz, ketma-ket kiriting)\n\nZagran pasport seriya-raqamingizni kiriting:',
-    validate: validators.passport,
-    errorMsg: 'Format noto\'g\'ri. 2 harf + 7 raqam, bo\'sh joysiz kiriting (masalan: FB1234567).',
-    sheetCol: 'N', // PASSPORT №
     next: () => 'phone',
   },
 
@@ -145,8 +145,8 @@ const STUDENT_STEPS = {
     type: 'buttons',
     question: 'Jinsingizni tanlang:',
     options: [
-      { text: 'Male', value: 'MALE' },
-      { text: 'Female', value: 'FEMALE' },
+      { text: 'Erkak', value: 'ERKAK' },
+      { text: 'Ayol', value: 'AYOL' },
     ],
     sheetCol: 'P', // GENDER
     next: () => 'jshshir',
@@ -203,7 +203,10 @@ const STUDENT_STEPS = {
     question: 'Sertifikat bahoingizni kiriting:',
     validate: validators.notEmpty,
     sheetCol: 'K', // SCORE
-    next: () => 'exam_date',
+    // Sertifikat ALLAQACHON qo'lida bo'lgan talaba uchun imtihon sanasi
+    // so'ralmaydi — bu savol faqat TAKER (hali imtihon topshirmagan)
+    // uchun kerak.
+    next: () => 'asosiy_maqsad',
   },
   certificate_type_taker: {
     type: 'buttons',
@@ -410,30 +413,28 @@ const STUDENT_STEPS = {
     type: 'skip', // avtomatik "EXPECTED" yoziladi, savol berilmaydi
     sheetCol: 'Y', // GPA
     autoValue: 'EXPECTED',
-    next: () => 'master_major_check',
+    next: () => 'master_major_gate',
   },
   gpa_known: {
     type: 'text',
     question: 'O\'rtacha bahoingiz (GPA)ni kiriting:',
     validate: validators.gpa,
     sheetCol: 'Y', // GPA
-    next: () => 'master_major_check',
+    next: () => 'master_major_gate',
   },
 
   // --- 14. MASTER SOHASI ---
-  // NOTE: "Master bosqichi tanlandimi" ma'lumoti hozircha STUDENT_STEPS
-  // ichida so'ralmaydi (bu bosqich darajasi shartnomada belgilanadi
-  // deb taxmin qilindi — AGREEMENT ustunida). Agar bot o'zi so'rashi
-  // kerak bo'lsa, shu yerga qo'shimcha step qo'shiladi.
-  master_major_check: {
-    type: 'buttons',
-    question: 'Magistratura (Master) darajasiga topshiryapsizmi?',
-    options: [
-      { text: 'Ha', value: 'HA' },
-      { text: 'Yo\'q', value: 'YOQ' },
-    ],
-    sheetCol: null,
-    next: (data) => (data.master_major_check === 'HA' ? 'master_major' : 'preferred_region'),
+  // Qayta so'ralmaydi — boshida tanlangan PROGRAM (C ustuni) qiymatiga
+  // qarab avtomatik aniqlanadi. Faqat "MAGISTRATURA" tanlangan bo'lsa
+  // shu savol so'raladi, aks holda o'tkazib yuboriladi. Bu step
+  // 'branch_by_sheet' turida — webhook.js Sheet'dan PROGRAM qiymatini
+  // o'qib, keyingi qadamni hisoblaydi.
+  master_major_gate: {
+    type: 'branch_by_sheet',
+    sheetColToCheck: 'C', // PROGRAM
+    matchValue: 'MAGISTRATURA',
+    ifMatchNext: 'master_major',
+    ifNoMatchNext: 'preferred_region',
   },
   master_major: {
     type: 'text',

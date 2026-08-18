@@ -49,8 +49,11 @@ const pendingGroupRequests = new Map();
 
 // Ustun harfini rowData obyekt kalitiga aylantirish uchun mos ustun
 // diapazoni (A dan AP gacha).
-const COLUMN_RANGE = 'A:AP';
-const LAST_COLUMN_INDEX = 42; // AP = 42-ustun
+const COLUMN_RANGE = 'A:AR';
+const LAST_COLUMN_INDEX = 44; // AR = 44-ustun
+
+const TELEGRAM_CHAT_ID_COLUMN = 'AQ'; // raqamli chat_id (proaktiv xabar yuborish uchun)
+const LAST_DOC_REMINDER_COLUMN = 'AR'; // oxirgi eslatma yuborilgan sana+soat
 
 function colIndexToLetter(idx) {
   // 1-based index -> 'A', 'B', ... 'Z', 'AA', 'AB' ...
@@ -106,8 +109,9 @@ async function updateCell(range, value) {
 async function findRowByContractId(contractId) {
   const rows = await readSheetRange(`${DRAFT_SHEET}!D2:D2000`);
   if (!rows) return null;
+  const normalizedInput = contractId.trim().toUpperCase();
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i] && String(rows[i][0]).trim() === contractId.trim()) {
+    if (rows[i] && String(rows[i][0]).trim().toUpperCase() === normalizedInput) {
       return i + 2; // header hisobga olinadi
     }
   }
@@ -119,7 +123,7 @@ async function findRowByContractId(contractId) {
  * aylantiradi.
  */
 async function getRowData(rowNum) {
-  const range = `${DRAFT_SHEET}!A${rowNum}:AP${rowNum}`;
+  const range = `${DRAFT_SHEET}!A${rowNum}:AR${rowNum}`;
   const result = await readSheetRange(range);
   const row = (result && result[0]) || [];
   const data = {};
@@ -146,6 +150,49 @@ async function writeCurrentStep(rowNum, stepKey) {
 async function logDocument(contractId, docCode, fileType, fileId) {
   const now = new Date().toISOString();
   await appendRow(`${DOCUMENTS_LOG_SHEET}!A:E`, [now, contractId, docCode, fileType, fileId]);
+}
+
+// Belgilangan hodimga (masalan @murodil_oke) talabaning barcha
+// hujjatlarini FULL holda qayta yuboradi — hujjatlar to'liq bo'lganda
+// bir marta chaqiriladi.
+const ADMIN_NOTIFY_CHAT_ID = process.env.ADMIN_NOTIFY_CHAT_ID; // /adminid orqali olinadi
+const WELCOME_VIDEO_FILE_ID = process.env.WELCOME_VIDEO_FILE_ID; // /setvideo orqali olinadi
+
+async function sendFullDocumentSetToAdmin(contractId) {
+  if (!ADMIN_NOTIFY_CHAT_ID) {
+    console.error('ADMIN_NOTIFY_CHAT_ID env variable o\'rnatilmagan — FULL hujjat to\'plami yuborilmadi.');
+    return;
+  }
+  const docs = await getDocumentsForContract(contractId);
+  if (docs.length === 0) return;
+  await sendMessage(ADMIN_NOTIFY_CHAT_ID, `Shartnoma ${contractId} — barcha hujjatlar to'liq yig'ildi (${docs.length} ta). Yuborilmoqda...`);
+  for (const doc of docs) {
+    await sendFileTo(ADMIN_NOTIFY_CHAT_ID, null, doc.fileType, doc.fileId, `${contractId}_${doc.docCode}`);
+  }
+}
+
+// Yangi talabaga tanishtiruv videosini yuboradi. Video hali
+// sozlanmagan bo'lsa (WELCOME_VIDEO_FILE_ID yo'q), jim o'tkazib
+// yuboriladi (talaba formasini davom ettirishga to'sqinlik qilmaydi).
+async function sendWelcomeVideo(chatId) {
+  if (!WELCOME_VIDEO_FILE_ID) {
+    console.error('WELCOME_VIDEO_FILE_ID o\'rnatilmagan — video yuborilmadi.');
+    return;
+  }
+  const payload = { chat_id: chatId, video: WELCOME_VIDEO_FILE_ID, caption: 'Videoni to\'liq ko\'rib chiqing!' };
+  const data = JSON.stringify(payload);
+  const options = {
+    hostname: 'api.telegram.org',
+    path: `/bot${BOT_TOKEN}/sendVideo`,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+  };
+  await new Promise((resolve) => {
+    const req = https.request(options, (res) => { res.on('data', () => {}); res.on('end', resolve); });
+    req.on('error', resolve);
+    req.write(data);
+    req.end();
+  });
 }
 
 async function getDocumentsForContract(contractId) {
@@ -186,10 +233,11 @@ function sendFileTo(chatId, threadId, fileType, fileId, caption) {
 // TELEGRAM API (staff bot patterni bilan bir xil)
 // ---------------------------------------------------------------------
 
-function sendMessage(chatId, text, replyMarkup) {
+function sendMessage(chatId, text, replyMarkup, threadId) {
   return new Promise((resolve, reject) => {
     const payload = { chat_id: chatId, text };
     if (replyMarkup) payload.reply_markup = replyMarkup;
+    if (threadId) payload.message_thread_id = threadId;
     const data = JSON.stringify(payload);
     const options = {
       hostname: 'api.telegram.org',
@@ -276,6 +324,18 @@ async function renderStep(chatId, rowNum, stepKey, sessionData) {
     return renderStep(chatId, rowNum, nextKey, sessionData);
   }
 
+  // 'branch_by_sheet' — savol so'ramasdan, Sheet'dagi boshqa ustun
+  // qiymatiga qarab keyingi qadamni tanlaydi (masalan: PROGRAM
+  // ustunida "MAGISTRATURA" bo'lsa — Master sohasi so'raladi, aks
+  // holda o'tkazib yuboriladi).
+  if (step.type === 'branch_by_sheet') {
+    const rowData = await getRowData(rowNum);
+    const checkValue = rowData[step.sheetColToCheck];
+    const nextKey = checkValue === step.matchValue ? step.ifMatchNext : step.ifNoMatchNext;
+    await writeCurrentStep(rowNum, nextKey);
+    return renderStep(chatId, rowNum, nextKey, sessionData);
+  }
+
   if (step.type === 'confirm_summary') {
     const rowData = await getRowData(rowNum);
     const lines = Object.entries(STUDENT_STEPS)
@@ -300,13 +360,24 @@ async function renderStep(chatId, rowNum, stepKey, sessionData) {
 
 async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
   const step = STUDENT_STEPS[stepKey];
+  const trimmedValue = typeof answerValue === 'string' ? answerValue.trim() : answerValue;
 
-  if (step.validate && !step.validate(answerValue)) {
+  if (step.validate && !step.validate(trimmedValue)) {
     await sendMessage(chatId, step.errorMsg || 'Format noto\'g\'ri, qayta kiriting.');
     return;
   }
 
-  await writeStepValue(rowNum, step.sheetCol, answerValue);
+  // XAVFSIZLIK/MANTIQ TEKSHIRUVI: otasining telefon raqami talabaning
+  // o'z raqami bilan bir xil bo'lishi mumkin emas.
+  if (stepKey === 'father_phone') {
+    const rowData = await getRowData(rowNum);
+    if (rowData.Q && rowData.Q.replace(/\D/g, '') === trimmedValue.replace(/\D/g, '')) {
+      await sendMessage(chatId, 'Bu raqam sizning o\'z telefon raqamingiz bilan bir xil. Otangizning boshqa (haqiqiy) raqamini kiriting:');
+      return;
+    }
+  }
+
+  await writeStepValue(rowNum, step.sheetCol, trimmedValue);
 
   // Tahrirlash rejimida bo'lsa — javobni yozib, to'g'ridan-to'g'ri
   // tasdiqlash sahifasiga qaytariladi (oddiy zanjirni davom ettirmaydi).
@@ -316,7 +387,7 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
     return renderStep(chatId, rowNum, 'confirm', {});
   }
 
-  const sessionData = { [stepKey]: answerValue };
+  const sessionData = { [stepKey]: trimmedValue };
   const nextKey = step.next(sessionData);
   await writeCurrentStep(rowNum, nextKey);
   await renderStep(chatId, rowNum, nextKey, sessionData);
@@ -344,11 +415,26 @@ app.post('/webhook', async (req, res) => {
 
     // Guruhga a'zolik o'zgarishi, va boshqa shaxsiy bo'lmagan hodisalar
     // e'tiborsiz qoldiriladi.
-    if (!message.text && !message.document && !message.photo) return res.sendStatus(200);
+    if (!message.text && !message.document && !message.photo && !message.video) return res.sendStatus(200);
 
     const chatId = message.chat.id;
     const text = (message.text || '').trim();
     const username = message.from.username || '';
+
+    // --- Admin ID olish uchun texnik buyruq (har doim ishlaydi,
+    // sessiyadan qat'iy nazar) ---
+    if (text === '/adminid') {
+      await sendMessage(chatId, `Sizning chat_id: ${chatId}\nUsername: @${username}`);
+      return res.sendStatus(200);
+    }
+
+    // --- Video yuborilsa, uning file_id'sini qaytaradi (WELCOME_VIDEO_FILE_ID
+    // sozlash uchun — video shaxsiy chatga bir marta yuboriladi, chiqqan
+    // ID Coolify environment variable'ga qo'yiladi) ---
+    if (message.video) {
+      await sendMessage(chatId, `Video file_id:\n${message.video.file_id}\n\nBuni WELCOME_VIDEO_FILE_ID environment variable sifatida saqlang.`);
+      return res.sendStatus(200);
+    }
 
     // --- /start: shartnoma ID so'raladi ---
     if (text === '/start') {
@@ -392,10 +478,18 @@ app.post('/webhook', async (req, res) => {
 
       if (!rowData.U && username) {
         await updateCell(`${DRAFT_SHEET}!U${rowNum}`, username);
+        await updateCell(`${DRAFT_SHEET}!${TELEGRAM_CHAT_ID_COLUMN}${rowNum}`, String(chatId));
       }
 
       const stepKey = findResumeStep(rowData);
       userStates.set(chatId, { mode: 'in_form', row: rowNum, contractId: text, editing: false });
+
+      // Faqat BIRINCHI marta kirganda (forma hali boshlanmagan) —
+      // tabrik xati + tanishtiruv video yuboriladi.
+      if (stepKey === FIRST_STEP) {
+        await sendMessage(chatId, 'Siz bizning kompaniyamiz bilan keyingi bosqichga o\'tganingiz bilan tabriklayman! 🎉');
+        await sendWelcomeVideo(chatId);
+      }
 
       await sendMessage(chatId, 'Shartnoma tasdiqlandi. Ma\'lumot kiritishni boshlaymiz.');
       await renderStep(chatId, rowNum, stepKey, {});
@@ -418,6 +512,7 @@ app.post('/webhook', async (req, res) => {
       // Tasdiqlandi — username yangilanadi (masalan talaba yangi
       // qurilma/akkaunt ishlatayotgan bo'lishi mumkin)
       await updateCell(`${DRAFT_SHEET}!U${session.row}`, session.pendingUsername);
+      await updateCell(`${DRAFT_SHEET}!${TELEGRAM_CHAT_ID_COLUMN}${session.row}`, String(chatId));
       const stepKey = findResumeStep(rowData);
       userStates.set(chatId, { mode: 'in_form', row: session.row, contractId: session.contractId, editing: false });
       await sendMessage(chatId, 'Tasdiqlandi. Davom etamiz.');
@@ -459,6 +554,9 @@ app.post('/webhook', async (req, res) => {
 
       if (isComplete(updatedList)) {
         await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
+        // Barcha hujjatlar to'liq bo'ldi — belgilangan hodimga
+        // (masalan @murodil_oke) FULL holda qayta yuboriladi.
+        await sendFullDocumentSetToAdmin(session.contractId);
       }
 
       session.mode = 'in_form';
@@ -504,7 +602,7 @@ async function handleGroupMessage(message) {
   const threadId = message.message_thread_id;
 
   if (text === '/hujjat' || text.startsWith('/hujjat@')) {
-    const result = await sendMessage(chatId, 'Qaysi talabaning hujjatlari kerak? Shartnoma raqamini SHU XABARGA REPLY qilib yozing.');
+    const result = await sendMessage(chatId, 'Qaysi talabaning hujjatlari kerak? Shartnoma raqamini SHU XABARGA REPLY qilib yozing.', null, threadId);
     if (result && result.result && result.result.message_id) {
       pendingGroupRequests.set(result.result.message_id, { chatId, threadId });
     }
@@ -520,11 +618,11 @@ async function handleGroupMessage(message) {
     const docs = await getDocumentsForContract(contractId);
 
     if (docs.length === 0) {
-      await sendMessage(reqChatId, `Shartnoma ${contractId} uchun hech qanday hujjat topilmadi.`);
+      await sendMessage(reqChatId, `Shartnoma ${contractId} uchun hech qanday hujjat topilmadi.`, null, reqThreadId);
       return;
     }
 
-    await sendMessage(reqChatId, `Shartnoma ${contractId} uchun ${docs.length} ta hujjat topildi, yuborilmoqda...`);
+    await sendMessage(reqChatId, `Shartnoma ${contractId} uchun ${docs.length} ta hujjat topildi, yuborilmoqda...`, null, reqThreadId);
     for (const doc of docs) {
       await sendFileTo(reqChatId, reqThreadId, doc.fileType, doc.fileId, `${contractId}_${doc.docCode}`);
     }
@@ -638,6 +736,65 @@ async function handleCallback(callback) {
 
 app.get('/', (req, res) => res.send('Student bot server ishlayapti'));
 
+// =====================================================================
+// KUNIGA 2 MARTA ESLATMA — ertalab 10:00 va kechqurun 17:00 (Toshkent
+// vaqti), hujjatlari hali TO'LIQ bo'lmagan talabalarga eslatma yuboradi.
+// AR ustuni (LAST_DOC_REMINDER) orqali bir kunda ikki marta ortiqcha
+// yuborilishining oldi olinadi.
+// =====================================================================
+
+function getTashkentHourAndDateKey() {
+  const now = new Date();
+  const tashkent = new Date(now.getTime() + 5 * 3600000);
+  return {
+    hour: tashkent.getUTCHours(),
+    minute: tashkent.getUTCMinutes(),
+    dateKey: tashkent.toISOString().slice(0, 10), // YYYY-MM-DD
+  };
+}
+
+let reminderTickRunning = false;
+
+async function runDocumentReminderTick() {
+  if (reminderTickRunning) return;
+  reminderTickRunning = true;
+  try {
+    const { hour, minute, dateKey } = getTashkentHourAndDateKey();
+    const isReminderWindow = (hour === 10 || hour === 17) && minute < 5;
+    if (!isReminderWindow) return;
+
+    const reminderKey = `${dateKey}-${hour}`;
+    const rows = await readSheetRange(`${DRAFT_SHEET}!A2:AR2000`);
+    if (!rows) return;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row) continue;
+      const rowNum = i + 2;
+      const status = row[1] || ''; // B
+      const contractId = row[3] || ''; // D
+      const missingCell = row[39] || ''; // AN
+      const chatId = row[42] || ''; // AQ
+      const lastReminder = row[43] || ''; // AR
+
+      if (!contractId || !chatId) continue;
+      if (status !== 'MA\'LUMOT TASDIQLANDI') continue; // hali forma tasdiqlanmagan
+      if (lastReminder === reminderKey) continue; // shu oyna uchun allaqachon yuborilgan
+
+      const missing = getMissingDocs(missingCell);
+      if (isComplete(missing)) continue; // hammasi topshirilgan
+
+      await sendMessage(chatId, 'Eslatma: hujjatlaringiz hali to\'liq emas.\n\n' + buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
+      await updateCell(`${DRAFT_SHEET}!AR${rowNum}`, reminderKey);
+    }
+  } catch (err) {
+    console.error('Eslatma tick xatosi:', err);
+  } finally {
+    reminderTickRunning = false;
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Student bot ${PORT} portida ishga tushdi`);
+  setInterval(runDocumentReminderTick, 5 * 60 * 1000);
 });
