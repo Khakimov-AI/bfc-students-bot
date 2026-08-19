@@ -37,14 +37,14 @@ const DOCUMENT_TYPES = [
   { code: 'DIVORCE_CERT', label: "Ajrashganlik to'g'risidagi ma'lumotnoma" },
   { code: 'CERTIFICATE', label: 'Sertifikat (til)' },
   { code: 'BANK_STATEMENT_UNIVERSITY', label: 'Bank statement (Universitet uchun)' },
-  { code: 'BANK_STATEMENT_EMBASSY_STUDENT', label: 'Bank statement (Elchixona uchun)' },
+  { code: 'KDB', label: 'KDB' },
   { code: 'BANK_STATEMENT_EMBASSY_PARENT', label: 'Ota-ona Bank statement (Elchixona uchun)' },
   { code: 'PARENT_INCOME', label: "Ota-ona yillik daromadi / mol-mulk hujjati" },
 ];
 
 const BANK_STATEMENT_CODES = [
   'BANK_STATEMENT_UNIVERSITY',
-  'BANK_STATEMENT_EMBASSY_STUDENT',
+  'KDB',
   'BANK_STATEMENT_EMBASSY_PARENT',
 ];
 
@@ -55,14 +55,25 @@ const CONDITIONAL_DOCS = [
   'FATHER_DEATH_CERT', 'MOTHER_DEATH_CERT', 'DIVORCE_CERT',
 ];
 
-// Har doim talab qilinadigan hujjatlar (shartli hujjatlarsiz)
+// VIZA BOSQICHI hujjatlari — boshida so'ralmaydi. Talaba universitetga
+// qabul qilinib, kontraktni to'lagandan keyin, ADMIN buyrug'i bilan
+// (/viza) shu hujjatlar talab qilinadigan ro'yxatga qo'shiladi.
+const VISA_STAGE_DOCS = [
+  'KDB',
+  'BANK_STATEMENT_EMBASSY_PARENT',
+];
+
+// Birinchi bosqichda (universitetga topshirish uchun) talab
+// qilinadigan hujjatlar — shartli va viza bosqichi hujjatlarisiz.
 const BASE_REQUIRED_DOCS = DOCUMENT_TYPES
   .map((d) => d.code)
-  .filter((code) => !CONDITIONAL_DOCS.includes(code));
+  .filter((code) => !CONDITIONAL_DOCS.includes(code) && !VISA_STAGE_DOCS.includes(code));
 
 /**
- * Ota va ona holatiga qarab (NORMAL / DEAD / DIVORCED), talab
- * qilinadigan hujjatlar ro'yxatini shakllantiradi.
+ * Ota va ona holatiga qarab (NORMAL / DEAD / DIVORCED), BIRINCHI
+ * BOSQICHDA talab qilinadigan hujjatlar ro'yxatini shakllantiradi.
+ * Viza bosqichi hujjatlari (KDB, ota-ona elchixona statement) bu
+ * ro'yxatga KIRMAYDI — ular keyinroq admin tomonidan qo'shiladi.
  * @param {string} fatherName - AF ustuni qiymati ('DEAD'/'DIVORCED'/ism)
  * @param {string} motherName - AI ustuni qiymati
  */
@@ -143,7 +154,7 @@ function buildBankStatementSubmenu(missingList) {
   const rows = [];
   const labels = {
     BANK_STATEMENT_UNIVERSITY: 'Universitet uchun',
-    BANK_STATEMENT_EMBASSY_STUDENT: 'Elchixona uchun (talaba)',
+    KDB: 'KDB',
     BANK_STATEMENT_EMBASSY_PARENT: 'Elchixona uchun (ota-ona)',
   };
   for (const code of BANK_STATEMENT_CODES) {
@@ -250,6 +261,7 @@ module.exports = {
   REQUIRED_DOCS,
   BASE_REQUIRED_DOCS,
   CONDITIONAL_DOCS,
+  VISA_STAGE_DOCS,
   BANK_STATEMENT_CODES,
   buildRequiredDocs,
   getMissingDocs,

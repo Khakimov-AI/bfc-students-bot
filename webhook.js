@@ -22,7 +22,7 @@ const { STUDENT_STEPS, findResumeStep, CURRENT_STEP_COLUMN, FIRST_STEP } = requi
 const {
   getMissingDocs, markDocReceived, isComplete,
   buildDocumentMenuKeyboard, buildBankStatementSubmenu, buildMissingDocsText,
-  sendDocumentToGroup, DOCUMENT_TYPES, REQUIRED_DOCS,
+  sendDocumentToGroup, DOCUMENT_TYPES, REQUIRED_DOCS, VISA_STAGE_DOCS,
 } = require('./documentCollection');
 
 const app = express();
@@ -363,6 +363,7 @@ function buildAdminMenuKeyboard() {
     inline_keyboard: [
       [{ text: '♻️ Hujjatni qaytarish', callback_data: 'menu:qaytar' }],
       [{ text: '📄 Talaba hujjatlarini olish', callback_data: 'menu:gethujjat' }],
+      [{ text: '🛂 Viza bosqichiga o\'tkazish (KDB)', callback_data: 'menu:viza' }],
     ],
   };
 }
@@ -533,6 +534,19 @@ app.post('/webhook', async (req, res) => {
     const text = (message.text || '').trim();
     const username = message.from.username || '';
 
+    // --- ADMIN: /viza — talaba viza bosqichiga o'tdi, endi KDB va
+    // ota-ona bank statement hujjatlari talab qilinadi. Faqat shu
+    // buyruqdan keyin ular ro'yxatga qo'shiladi va eslatma boshlanadi.
+    if (text === '/viza') {
+      if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+        await sendMessage(chatId, 'Bu buyruq faqat administrator uchun.');
+        return res.sendStatus(200);
+      }
+      userStates.set(chatId, { mode: 'admin_visa_awaiting_id' });
+      await sendMessage(chatId, 'Qaysi talaba viza bosqichiga o\'tdi? Shartnoma raqamini kiriting:\n\n(Bir nechta talaba bo\'lsa, vergul bilan ajratib yozing)');
+      return res.sendStatus(200);
+    }
+
     // --- ADMIN: /qaytar — hujjatlardan birortasi to'g'ri bo'lmasa,
     // Murodil shu buyruq orqali qaysi hujjat(lar) qayta so'ralishini
     // belgilaydi. Faqat ADMIN_NOTIFY_CHAT_ID'dan ishlaydi.
@@ -589,8 +603,41 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // --- Admin oqimi: shartnoma ID kutilmoqda ---
+    // --- Admin oqimi: viza bosqichi uchun shartnoma ID(lar) kutilmoqda ---
     const session = userStates.get(chatId);
+    if (session && session.mode === 'admin_visa_awaiting_id') {
+      userStates.delete(chatId);
+      const ids = text.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+      const results = [];
+
+      for (const id of ids) {
+        const rowNum = await findRowByContractId(id);
+        if (!rowNum) { results.push(`${id} — topilmadi`); continue; }
+
+        const rowData = await getRowData(rowNum);
+        const currentMissing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+        const newMissing = Array.from(new Set([...currentMissing, ...VISA_STAGE_DOCS]));
+        await updateCell(`${DRAFT_SHEET}!AN${rowNum}`, newMissing.join(', '));
+        await updateCell(`${DRAFT_SHEET}!B${rowNum}`, 'VIZA BOSQICHI');
+
+        const studentChatId = rowData[TELEGRAM_CHAT_ID_COLUMN];
+        if (studentChatId) {
+          await sendMessage(studentChatId,
+            'Tabriklaymiz! Siz viza olish bosqichiga o\'tdingiz.\n\n' +
+            'Endi quyidagi hujjatlarni taqdim qilishingiz kerak:\n' +
+            '\u2022 KDB\n\u2022 Ota-ona Bank statement (Elchixona uchun)\n\n' +
+            'Hujjatlarni yuborish uchun quyidagi tugmalardan foydalaning.',
+            buildDocumentMenuKeyboard(newMissing));
+          results.push(`${id} — bajarildi, talabaga xabar berildi`);
+        } else {
+          results.push(`${id} — bajarildi, lekin talaba bot bilan bog'lanmagan`);
+        }
+      }
+
+      await sendMessage(chatId, 'Natija:\n\n' + results.join('\n'));
+      return res.sendStatus(200);
+    }
+
     if (session && session.mode === 'admin_get_docs_awaiting_id') {
       const docs = await getDocumentsForContract(text);
       userStates.delete(chatId);
@@ -706,35 +753,52 @@ app.post('/webhook', async (req, res) => {
       if (message.document) { fileId = message.document.file_id; fileType = 'document'; }
       else { const photos = message.photo; fileId = photos[photos.length - 1].file_id; fileType = 'photo'; }
 
-      const forwardResult = await sendDocumentToGroup(fileType, fileId, session.contractId, session.docCode);
+      const docCode = session.docCode;
+      const contractId = session.contractId;
+
+      // Rejimni DARHOL qaytarish — agar quyida xato chiqsa ham,
+      // foydalanuvchi "hujjat kutilmoqda" holatida qotib qolmasin.
+      session.mode = 'in_form';
+      userStates.set(chatId, session);
+
+      const forwardResult = await sendDocumentToGroup(fileType, fileId, contractId, docCode);
 
       if (!forwardResult || !forwardResult.ok) {
-        // Guruhga yuborish MUVAFFAQIYATSIZ bo'ldi — hujjat "qabul
-        // qilindi" deb belgilanmaydi, talabaga aniq aytiladi.
-        console.error(`Hujjat forward xatosi (${session.docCode}, shartnoma ${session.contractId}):`, forwardResult);
+        console.error(`Hujjat forward xatosi (${docCode}, shartnoma ${contractId}):`, forwardResult);
         await sendMessage(chatId, 'Kechirasiz, hujjatni yuborishda texnik xatolik yuz berdi. Iltimos, qayta urinib ko\'ring yoki administratorga murojaat qiling.');
         return res.sendStatus(200);
       }
 
-      const rowData = await getRowData(session.row);
-      // Muvaffaqiyatli forward qilindi — keyinchalik hodim so'rovi
-      // uchun jurnalga yoziladi.
-      await logDocument(session.contractId, session.docCode, fileType, fileId);
-      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
-      const { updatedList, cellValue } = markDocReceived(missing, session.docCode);
-      await updateCell(`${DRAFT_SHEET}!AN${session.row}`, cellValue);
+      // Sheets amallarini alohida try/catch ichida bajaramiz — bu yerda
+      // xato chiqsa (masalan API kvota limiti), foydalanuvchi baribir
+      // javob olishi kerak, jim qolmasligi kerak.
+      try {
+        const rowData = await getRowData(session.row);
+        await logDocument(contractId, docCode, fileType, fileId);
+        const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+        const { updatedList, cellValue } = markDocReceived(missing, docCode);
+        await updateCell(`${DRAFT_SHEET}!AN${session.row}`, cellValue);
 
-      if (isComplete(updatedList)) {
-        await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
-        // Barcha hujjatlar to'liq bo'ldi — belgilangan hodimga
-        // (masalan @murodil_oke) FULL holda qayta yuboriladi.
-        await sendFullDocumentSetToAdmin(session.contractId);
+        if (isComplete(updatedList)) {
+          await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
+          await sendFullDocumentSetToAdmin(contractId);
+          await sendMessage(chatId,
+            'Barcha hujjatlaringiz muvaffaqiyatli qabul qilindi!\n\n' +
+            'Hujjatlaringiz tez orada tekshirib chiqiladi. Agar xato yoki kamchilik bo\'lsa, ' +
+            'mas\'ul hodimimiz siz bilan bog\'lanadi.');
+        } else {
+          await sendMessage(chatId, 'Hujjat qabul qilindi.\n\n' + buildMissingDocsText(updatedList),
+            buildDocumentMenuKeyboard(updatedList));
+        }
+      } catch (sheetErr) {
+        console.error('Hujjat qabul qilingandan keyingi Sheets xatosi:', sheetErr);
+        // Fayl guruhga BORDI — shuning uchun "qabul qilindi" deyish
+        // to'g'ri, faqat ro'yxat yangilanmagani aytiladi.
+        await sendMessage(chatId,
+          'Hujjatingiz qabul qilindi, lekin ro\'yxatni yangilashda texnik nosozlik yuz berdi. ' +
+          'Hujjatlar holatini ko\'rish uchun /hujjatlar buyrug\'ini yuboring.');
       }
 
-      session.mode = 'in_form';
-      userStates.set(chatId, session);
-      await sendMessage(chatId, 'Hujjat qabul qilindi.\n\n' + buildMissingDocsText(updatedList),
-        updatedList.length > 0 ? buildDocumentMenuKeyboard(updatedList) : null);
       return res.sendStatus(200);
     }
 
@@ -855,6 +919,16 @@ async function handleCallback(callback) {
       return;
     }
     await sendStudentStatus(chatId, s.row);
+    return;
+  }
+  if (data === 'menu:viza') {
+    if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+      answerCallbackQuery(callbackId, 'Ruxsat yo\'q.');
+      return;
+    }
+    userStates.set(chatId, { mode: 'admin_visa_awaiting_id' });
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, 'Qaysi talaba viza bosqichiga o\'tdi? Shartnoma raqamini kiriting:\n\n(Bir nechta talaba bo\'lsa, vergul bilan ajratib yozing)');
     return;
   }
   if (data === 'menu:gethujjat') {
@@ -1083,7 +1157,12 @@ async function runDocumentReminderTick() {
       const lastReminder = row[43] || ''; // AR
 
       if (!contractId || !chatId) continue;
-      if (status !== 'MA\'LUMOT TASDIQLANDI') continue; // hali forma tasdiqlanmagan
+      // Eslatma faqat shu ikki holatda yuboriladi:
+      //  - MA'LUMOT TASDIQLANDI: birinchi bosqich hujjatlari yig'ilmoqda
+      //  - VIZA BOSQICHI: admin /viza orqali KDB va ota-ona statement
+      //    talab qilgan, ular hali to'liq emas
+      const st = String(status).toUpperCase();
+      if (st !== 'MA\'LUMOT TASDIQLANDI' && st !== 'VIZA BOSQICHI') continue;
       if (lastReminder === reminderKey) continue; // shu oyna uchun allaqachon yuborilgan
 
       const missing = getMissingDocs(missingCell, fatherName, motherName);
