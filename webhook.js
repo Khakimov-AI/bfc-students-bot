@@ -198,8 +198,9 @@ async function sendWelcomeVideo(chatId) {
 async function getDocumentsForContract(contractId) {
   const rows = await readSheetRange(`${DOCUMENTS_LOG_SHEET}!A2:E5000`);
   if (!rows) return [];
+  const normalized = String(contractId).trim().toUpperCase();
   return rows
-    .filter((r) => r && String(r[1]).trim() === contractId.trim())
+    .filter((r) => r && String(r[1]).trim().toUpperCase() === normalized)
     .map((r) => ({ timestamp: r[0], docCode: r[2], fileType: r[3], fileId: r[4] }));
 }
 
@@ -305,14 +306,54 @@ function buildConfirmSummaryKeyboard() {
 }
 
 // ---------------------------------------------------------------------
+// TALABA HOLATI (/status) — DRAFT!B (STATUS) ustunidan o'qib,
+// talabaga tushunarli matn ko'rinishida qaytaradi.
+// Kelajakda DB sahifasidan o'qishga o'tkaziladi (journey map to'liq
+// bosqichlari bilan) — hozircha DRAFT!B yetarli.
+// ---------------------------------------------------------------------
+
+const STATUS_MESSAGES = {
+  "MA'LUMOT TASDIQLANDI": 'Ma\'lumotlaringiz tasdiqlandi. Hozir hujjatlarni yig\'ish bosqichidasiz.',
+  "HUJJATLAR TO'LIQ": 'Barcha hujjatlaringiz qabul qilindi. Hujjatlaringiz mutaxassislarimiz tomonidan tekshirilmoqda.',
+  'SHARTNOMA QILDI': 'Shartnoma bosqichi yakunlangan.',
+  "TO'LOV QILDI": 'To\'lovingiz qabul qilindi.',
+};
+
+async function sendStudentStatus(chatId, rowNum) {
+  const rowData = await getRowData(rowNum);
+  const status = String(rowData.B || '').trim();
+  const contractId = rowData.D || '';
+  const fullName = rowData.E || '';
+
+  let statusText = STATUS_MESSAGES[status.toUpperCase()];
+  if (!statusText) {
+    statusText = status
+      ? `Joriy bosqich: ${status}`
+      : 'Holatingiz hali belgilanmagan. Ma\'lumotlaringizni to\'ldirishni yakunlang.';
+  }
+
+  const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+  let text = `Shartnoma: ${contractId}\n`;
+  if (fullName) text += `Ism: ${fullName}\n`;
+  text += `\n${statusText}\n`;
+
+  if (!isComplete(missing)) {
+    text += `\nYetishmayotgan hujjatlar: ${missing.length} ta`;
+  }
+
+  await sendMessage(chatId, text);
+}
+
+
+// ---------------------------------------------------------------------
 // FUNKSIYA MENYULARI (rol asosida farqlanadi)
 // ---------------------------------------------------------------------
 
-function buildStudentMenuKeyboard() {
-  return {
+function buildStudentMenuKeyboard() {  return {
     inline_keyboard: [
       [{ text: '🆕 Boshlash / shartnoma ID', callback_data: 'menu:start' }],
       [{ text: '📄 Hujjatlar holati', callback_data: 'menu:docs' }],
+      [{ text: '📊 Mening holatim', callback_data: 'menu:status' }],
     ],
   };
 }
@@ -321,6 +362,7 @@ function buildAdminMenuKeyboard() {
   return {
     inline_keyboard: [
       [{ text: '♻️ Hujjatni qaytarish', callback_data: 'menu:qaytar' }],
+      [{ text: '📄 Talaba hujjatlarini olish', callback_data: 'menu:gethujjat' }],
     ],
   };
 }
@@ -414,13 +456,36 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
     return;
   }
 
-  // XAVFSIZLIK/MANTIQ TEKSHIRUVI: otasining telefon raqami talabaning
-  // o'z raqami bilan bir xil bo'lishi mumkin emas.
-  if (stepKey === 'father_phone') {
+  // XAVFSIZLIK/MANTIQ TEKSHIRUVI: telefon raqamlari takrorlanmasligi
+  // kerak — talaba, otasi va onasi uchun uchta ALOHIDA raqam bo'lishi
+  // shart.
+  if (stepKey === 'phone' || stepKey === 'father_phone' || stepKey === 'mother_phone') {
     const rowData = await getRowData(rowNum);
-    if (rowData.Q && rowData.Q.replace(/\D/g, '') === trimmedValue.replace(/\D/g, '')) {
-      await sendMessage(chatId, 'Bu raqam sizning o\'z telefon raqamingiz bilan bir xil. Otangizning boshqa (haqiqiy) raqamini kiriting:');
-      return;
+    const digits = (v) => String(v || '').replace(/\D/g, '');
+    const entered = digits(trimmedValue);
+
+    // Har bir maydon uchun: qaysi boshqa ustunlar bilan solishtiriladi
+    const compareMap = {
+      phone: [
+        { col: 'AG', label: 'otangizning raqami' },
+        { col: 'AJ', label: 'onangizning raqami' },
+      ],
+      father_phone: [
+        { col: 'Q', label: 'sizning raqamingiz' },
+        { col: 'AJ', label: 'onangizning raqami' },
+      ],
+      mother_phone: [
+        { col: 'Q', label: 'sizning raqamingiz' },
+        { col: 'AG', label: 'otangizning raqami' },
+      ],
+    };
+
+    for (const { col, label } of compareMap[stepKey]) {
+      const existing = digits(rowData[col]);
+      if (existing && existing === entered) {
+        await sendMessage(chatId, `Bu raqam ${label} bilan bir xil. Har bir shaxs uchun ALOHIDA telefon raqami kiritilishi kerak. Boshqa raqam kiriting:`);
+        return;
+      }
     }
   }
 
@@ -491,6 +556,17 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // --- /status: talabaning joriy bosqichi (DB!STATUS ustunidan) ---
+    if (text === '/status') {
+      const s = userStates.get(chatId);
+      if (!s || !s.row) {
+        await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting (/start).');
+        return res.sendStatus(200);
+      }
+      await sendStudentStatus(chatId, s.row);
+      return res.sendStatus(200);
+    }
+
     // --- Admin ID olish uchun texnik buyruq (har doim ishlaydi,
     // sessiyadan qat'iy nazar) ---
     if (text === '/adminid') {
@@ -515,13 +591,28 @@ app.post('/webhook', async (req, res) => {
 
     // --- Admin oqimi: shartnoma ID kutilmoqda ---
     const session = userStates.get(chatId);
+    if (session && session.mode === 'admin_get_docs_awaiting_id') {
+      const docs = await getDocumentsForContract(text);
+      userStates.delete(chatId);
+      if (docs.length === 0) {
+        await sendMessage(chatId, `Shartnoma ${text.toUpperCase()} uchun hech qanday hujjat topilmadi.`);
+        return res.sendStatus(200);
+      }
+      const normalizedId = text.trim().toUpperCase();
+      await sendMessage(chatId, `${docs.length} ta hujjat topildi, yuborilmoqda...`);
+      for (const doc of docs) {
+        await sendFileTo(chatId, null, doc.fileType, doc.fileId, `${normalizedId}_${doc.docCode}`);
+      }
+      return res.sendStatus(200);
+    }
+
     if (session && session.mode === 'admin_return_awaiting_id') {
       const rowNum = await findRowByContractId(text);
       if (!rowNum) {
         await sendMessage(chatId, 'Bunday shartnoma topilmadi. Qayta kiriting.');
         return res.sendStatus(200);
       }
-      userStates.set(chatId, { mode: 'admin_return_selecting_docs', row: rowNum, contractId: text, selectedCodes: [] });
+      userStates.set(chatId, { mode: 'admin_return_selecting_docs', row: rowNum, contractId: text.trim().toUpperCase(), selectedCodes: [] });
       await sendMessage(chatId, 'Qaysi hujjat(lar) qayta so\'ralsin? Tanlang (bir nechtasini belgilash mumkin):', buildAdminDocSelectKeyboard([]));
       return res.sendStatus(200);
     }
@@ -550,7 +641,7 @@ app.post('/webhook', async (req, res) => {
         userStates.set(chatId, {
           mode: 'awaiting_phone_verify',
           row: rowNum,
-          contractId: text,
+          contractId: text.trim().toUpperCase(),
           pendingUsername: username,
         });
         await sendMessage(chatId, 'Xavfsizlik uchun, ushbu shartnomada ro\'yxatdan o\'tgan telefon raqamining OXIRGI 4 ta raqamini kiriting:');
@@ -563,7 +654,7 @@ app.post('/webhook', async (req, res) => {
       }
 
       const stepKey = findResumeStep(rowData);
-      userStates.set(chatId, { mode: 'in_form', row: rowNum, contractId: text, editing: false });
+      userStates.set(chatId, { mode: 'in_form', row: rowNum, contractId: text.trim().toUpperCase(), editing: false });
 
       // Faqat BIRINCHI marta kirganda (forma hali boshlanmagan) —
       // tabrik xati + tanishtiruv video yuboriladi.
@@ -604,7 +695,7 @@ app.post('/webhook', async (req, res) => {
     // --- Hujjatlar buyrug'i ---
     if (text === '/hujjatlar' && session.mode === 'in_form') {
       const rowData = await getRowData(session.row);
-      const missing = getMissingDocs(rowData.AN);
+      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
       await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
       return res.sendStatus(200);
     }
@@ -629,7 +720,7 @@ app.post('/webhook', async (req, res) => {
       // Muvaffaqiyatli forward qilindi — keyinchalik hodim so'rovi
       // uchun jurnalga yoziladi.
       await logDocument(session.contractId, session.docCode, fileType, fileId);
-      const missing = getMissingDocs(rowData.AN);
+      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
       const { updatedList, cellValue } = markDocReceived(missing, session.docCode);
       await updateCell(`${DRAFT_SHEET}!AN${session.row}`, cellValue);
 
@@ -752,8 +843,28 @@ async function handleCallback(callback) {
       return;
     }
     const rowData = await getRowData(s.row);
-    const missing = getMissingDocs(rowData.AN);
+    const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
     await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
+    return;
+  }
+  if (data === 'menu:status') {
+    const s = userStates.get(chatId);
+    answerCallbackQuery(callbackId, '');
+    if (!s || !s.row) {
+      await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting (/start).');
+      return;
+    }
+    await sendStudentStatus(chatId, s.row);
+    return;
+  }
+  if (data === 'menu:gethujjat') {
+    if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+      answerCallbackQuery(callbackId, 'Ruxsat yo\'q.');
+      return;
+    }
+    userStates.set(chatId, { mode: 'admin_get_docs_awaiting_id' });
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, 'Qaysi talabaning hujjatlari kerak? Shartnoma raqamini kiriting:');
     return;
   }
   if (data === 'menu:qaytar') {
@@ -791,7 +902,7 @@ async function handleCallback(callback) {
       answerCallbackQuery(callbackId, '');
 
       const rowData = await getRowData(s.row);
-      const currentMissing = getMissingDocs(rowData.AN);
+      const currentMissing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
       // Tanlangan kodlarni "kam hujjatlar" ro'yxatiga qaytarish
       // (takrorlanmasin, shuning uchun Set orqali birlashtiriladi)
       const newMissing = Array.from(new Set([...currentMissing, ...s.selectedCodes]));
@@ -899,19 +1010,19 @@ async function handleCallback(callback) {
 
     if (code === 'bank_menu') {
       const rowData = await getRowData(session.row);
-      const missing = getMissingDocs(rowData.AN);
+      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
       await sendMessage(chatId, 'Qaysi bank statement turini yuborasiz?', buildBankStatementSubmenu(missing));
       return;
     }
     if (code === 'status') {
       const rowData = await getRowData(session.row);
-      const missing = getMissingDocs(rowData.AN);
+      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
       await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
       return;
     }
     if (code === 'back') {
       const rowData = await getRowData(session.row);
-      const missing = getMissingDocs(rowData.AN);
+      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
       await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
       return;
     }
@@ -966,6 +1077,8 @@ async function runDocumentReminderTick() {
       const status = row[1] || ''; // B
       const contractId = row[3] || ''; // D
       const missingCell = row[39] || ''; // AN
+      const fatherName = row[31] || ''; // AF
+      const motherName = row[34] || ''; // AI
       const chatId = row[42] || ''; // AQ
       const lastReminder = row[43] || ''; // AR
 
@@ -973,7 +1086,7 @@ async function runDocumentReminderTick() {
       if (status !== 'MA\'LUMOT TASDIQLANDI') continue; // hali forma tasdiqlanmagan
       if (lastReminder === reminderKey) continue; // shu oyna uchun allaqachon yuborilgan
 
-      const missing = getMissingDocs(missingCell);
+      const missing = getMissingDocs(missingCell, fatherName, motherName);
       if (isComplete(missing)) continue; // hammasi topshirilgan
 
       await sendMessage(chatId, 'Eslatma: hujjatlaringiz hali to\'liq emas.\n\n' + buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));

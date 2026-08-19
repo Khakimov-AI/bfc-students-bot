@@ -28,10 +28,13 @@ const DOCUMENT_TYPES = [
   { code: 'ID', label: 'ID karta' },
   { code: 'PASSPORT', label: 'Passport (chet elga chiqish)' },
   { code: 'DIPLOM', label: 'Diplom yoki shahodatnoma' },
-  { code: 'BIRTH_CERT', label: 'Birth certificate' },
-  { code: 'PHOTO', label: 'Photo' },
-  { code: 'FATHER_PASSPORT', label: "Father's passport" },
-  { code: 'MOTHER_PASSPORT', label: "Mother's passport" },
+  { code: 'BIRTH_CERT', label: "Tug'ilganlik to'g'risidagi ma'lumotnoma (Metrka)" },
+  { code: 'PHOTO', label: 'Rasm 3x4' },
+  { code: 'FATHER_PASSPORT', label: 'Otangizning passporti' },
+  { code: 'MOTHER_PASSPORT', label: 'Onangizning passporti' },
+  { code: 'FATHER_DEATH_CERT', label: "Otangizning o'limi to'g'risidagi ma'lumotnoma" },
+  { code: 'MOTHER_DEATH_CERT', label: "Onangizning o'limi to'g'risidagi ma'lumotnoma" },
+  { code: 'DIVORCE_CERT', label: "Ajrashganlik to'g'risidagi ma'lumotnoma" },
   { code: 'CERTIFICATE', label: 'Sertifikat (til)' },
   { code: 'BANK_STATEMENT_UNIVERSITY', label: 'Bank statement (Universitet uchun)' },
   { code: 'BANK_STATEMENT_EMBASSY_STUDENT', label: 'Bank statement (Elchixona uchun)' },
@@ -45,6 +48,41 @@ const BANK_STATEMENT_CODES = [
   'BANK_STATEMENT_EMBASSY_PARENT',
 ];
 
+// Ota-ona holatiga bog'liq hujjatlar — ular DOIM so'ralmaydi,
+// faqat tegishli holat bo'lganda ro'yxatga qo'shiladi.
+const CONDITIONAL_DOCS = [
+  'FATHER_PASSPORT', 'MOTHER_PASSPORT',
+  'FATHER_DEATH_CERT', 'MOTHER_DEATH_CERT', 'DIVORCE_CERT',
+];
+
+// Har doim talab qilinadigan hujjatlar (shartli hujjatlarsiz)
+const BASE_REQUIRED_DOCS = DOCUMENT_TYPES
+  .map((d) => d.code)
+  .filter((code) => !CONDITIONAL_DOCS.includes(code));
+
+/**
+ * Ota va ona holatiga qarab (NORMAL / DEAD / DIVORCED), talab
+ * qilinadigan hujjatlar ro'yxatini shakllantiradi.
+ * @param {string} fatherName - AF ustuni qiymati ('DEAD'/'DIVORCED'/ism)
+ * @param {string} motherName - AI ustuni qiymati
+ */
+function buildRequiredDocs(fatherName, motherName) {
+  const docs = [...BASE_REQUIRED_DOCS];
+  const f = String(fatherName || '').trim().toUpperCase();
+  const m = String(motherName || '').trim().toUpperCase();
+
+  if (f === 'DEAD') docs.push('FATHER_DEATH_CERT');
+  else if (f !== 'DIVORCED' && f !== '') docs.push('FATHER_PASSPORT');
+
+  if (m === 'DEAD') docs.push('MOTHER_DEATH_CERT');
+  else if (m !== 'DIVORCED' && m !== '') docs.push('MOTHER_PASSPORT');
+
+  // Ota YOKI ona ajrashgan bo'lsa — ajrashganlik hujjati bir marta
+  if (f === 'DIVORCED' || m === 'DIVORCED') docs.push('DIVORCE_CERT');
+
+  return docs;
+}
+
 const REQUIRED_DOCS = DOCUMENT_TYPES.map((d) => d.code);
 
 // ---------------------------------------------------------------------
@@ -53,11 +91,12 @@ const REQUIRED_DOCS = DOCUMENT_TYPES.map((d) => d.code);
 
 /**
  * AN ustunidagi qiymatdan hozirgi "kam hujjatlar" ro'yxatini oladi.
- * Bo'sh bo'lsa — hammasi kam deb hisoblanadi (forma yangi boshlangan).
+ * Bo'sh bo'lsa — ota-ona holatiga qarab hisoblangan to'liq ro'yxat
+ * qaytariladi (fatherName/motherName berilgan bo'lsa).
  */
-function getMissingDocs(anCellValue) {
+function getMissingDocs(anCellValue, fatherName, motherName) {
   if (!anCellValue || String(anCellValue).trim() === '') {
-    return [...REQUIRED_DOCS];
+    return buildRequiredDocs(fatherName, motherName);
   }
   return String(anCellValue)
     .split(',')
@@ -154,14 +193,27 @@ function sendDocumentToGroup(fileType, fileId, contractId, docCode) {
       let body = '';
       res.on('data', (chunk) => (body += chunk));
       res.on('end', () => {
+        let parsed;
         try {
-          resolve(JSON.parse(body));
+          parsed = JSON.parse(body);
         } catch (e) {
-          resolve(null);
+          console.error('sendDocumentToGroup: javobni JSON qilib o\'qib bo\'lmadi:', body);
+          return resolve({ ok: false, description: 'Invalid JSON response' });
         }
+        if (!parsed.ok) {
+          // MUHIM: bu xato konteyner loglarida ko'rinadi (docker logs orqali).
+          // Eng ko'p uchraydigan sabablar: bot guruhga a'zo emas,
+          // message_thread_id noto'g'ri/mavjud emas, yoki bot guruhda
+          // xabar yozish huquqiga ega emas.
+          console.error('sendDocumentToGroup XATO:', JSON.stringify(parsed));
+        }
+        resolve(parsed);
       });
     });
-    req.on('error', reject);
+    req.on('error', (err) => {
+      console.error('sendDocumentToGroup tarmoq xatosi:', err);
+      resolve({ ok: false, description: err.message });
+    });
     req.write(data);
     req.end();
   });
@@ -196,7 +248,10 @@ function sendDocumentToGroup(fileType, fileId, contractId, docCode) {
 module.exports = {
   DOCUMENT_TYPES,
   REQUIRED_DOCS,
+  BASE_REQUIRED_DOCS,
+  CONDITIONAL_DOCS,
   BANK_STATEMENT_CODES,
+  buildRequiredDocs,
   getMissingDocs,
   markDocReceived,
   isComplete,

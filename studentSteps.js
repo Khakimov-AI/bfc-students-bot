@@ -342,8 +342,9 @@ const STUDENT_STEPS = {
   // --- 11. MANZIL + ZIP ---
   address: {
     type: 'text',
-    question: 'Yashaydigan to\'liq manzilingizni kiriting:',
+    question: 'NAMUNA: Andijon, Andijon tumani, Qandolatchilar ko\'chasi 3\n\nYashaydigan to\'liq manzilingizni shu tartibda kiriting:',
     validate: validators.notEmpty,
+    errorMsg: 'Manzilni namunadagi tartibda to\'liq kiriting.',
     sheetCol: 'S', // ADRESS
     next: () => 'zip_code',
   },
