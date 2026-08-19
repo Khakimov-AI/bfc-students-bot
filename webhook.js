@@ -35,6 +35,7 @@ const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.STUDENT_BOT_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
 const DRAFT_SHEET = 'DRAFT';
+const DB_SHEET = 'DB'; // asosiy ma'lumot ombori (journey/status manbai)
 const DOCUMENTS_LOG_SHEET = 'DOCUMENT_LOG'; // A:timestamp B:contractId C:docCode D:fileType E:fileId
 
 const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
@@ -309,39 +310,132 @@ function buildConfirmSummaryKeyboard() {
 }
 
 // ---------------------------------------------------------------------
-// TALABA HOLATI (/status) — DRAFT!B (STATUS) ustunidan o'qib,
+// DB SAHIFASI — asosiy ma'lumot ombori. /status va statistika shu
+// yerdan o'qiydi (DRAFT emas).
+// Ustunlar: A:№ B:PAYMENT C:DOCUMENT_STATUS D:STATUS E:SUPERVISOR
+//   F:ID G:FULL NAME H:UNIVERSITY 1 I:UNIVERSITY 2 J:AGREEMENT
+//   K:CERT STATUS L:CERTIFICATE M:SCORE N:BRANCH O:AGREEMENT COMPANY
+//   ... AP:MISSING DOCS AQ:MUHIM IZOH
+// ---------------------------------------------------------------------
+
+const DB_COL = {
+  NUM: 0, PAYMENT: 1, DOCUMENT_STATUS: 2, STATUS: 3, SUPERVISOR: 4,
+  ID: 5, FULL_NAME: 6, UNIVERSITY_1: 7, UNIVERSITY_2: 8, AGREEMENT: 9,
+  BRANCH: 13, PHONE: 18, MISSING_DOCS: 41, IZOH: 42,
+};
+
+/**
+ * DB sahifasidan shartnoma ID bo'yicha qatorni topadi.
+ * @returns {Array|null} qator massivi yoki null
+ */
+async function findDbRowByContractId(contractId) {
+  const rows = await readSheetRange(`${DB_SHEET}!A2:AQ3000`);
+  if (!rows) return null;
+  const normalized = String(contractId).trim().toUpperCase();
+  for (const row of rows) {
+    if (!row) continue;
+    if (String(row[DB_COL.ID] || '').trim().toUpperCase() === normalized) return row;
+  }
+  return null;
+}
+
+async function findStudentChatId(contractId) {
+  const rowNum = await findRowByContractId(contractId);
+  if (!rowNum) return null;
+  const rowData = await getRowData(rowNum);
+  return rowData[TELEGRAM_CHAT_ID_COLUMN] || null;
+}
+
+
 // talabaga tushunarli matn ko'rinishida qaytaradi.
 // Kelajakda DB sahifasidan o'qishga o'tkaziladi (journey map to'liq
 // bosqichlari bilan) — hozircha DRAFT!B yetarli.
 // ---------------------------------------------------------------------
 
+// STATUS matnlari — DB!D ustunidagi har bir qiymat uchun talabaga
+// ko'rsatiladigan xabar. Kalitlar KATTA HARF bilan.
+// ESLATMA: bu matnlarni BOSS o'zi yakuniy tahrirlaydi — quyidagilar
+// dastlabki variant, o'zgartirish uchun faqat shu ro'yxatni tahrirlang.
 const STATUS_MESSAGES = {
-  "MA'LUMOT TASDIQLANDI": 'Ma\'lumotlaringiz tasdiqlandi. Hozir hujjatlarni yig\'ish bosqichidasiz.',
-  "HUJJATLAR TO'LIQ": 'Barcha hujjatlaringiz qabul qilindi. Hujjatlaringiz mutaxassislarimiz tomonidan tekshirilmoqda.',
-  'SHARTNOMA QILDI': 'Shartnoma bosqichi yakunlangan.',
-  "TO'LOV QILDI": 'To\'lovingiz qabul qilindi.',
+  'SHARTNOMA QILDI': 'Siz biz bilan shartnoma tuzdingiz. Keyingi bosqichga o\'tish uchun boshlang\'ich to\'lovni amalga oshirishingiz kerak.',
+  "TO'LOV QILMADI": 'Hozircha to\'lovingiz qayd etilmagan. Jarayonni boshlash uchun boshlang\'ich to\'lovni amalga oshiring.',
+  "TO'LOV QILDI": 'Sizning boshlang\'ich to\'lovingiz amalga oshirilgan. Keyingi bosqichga darhol o\'tishimiz uchun hujjatlaringizni to\'liq taqdim qilishingiz kerak!',
+  "HUJJAT YIG'ILMOQDA": 'Hozir hujjatlaringiz yig\'ilmoqda. Yetishmayotgan hujjatlarni tezroq yuboring.',
+  "HUJJAT TO'LIQ": 'Barcha hujjatlaringiz qabul qilindi. Mutaxassislarimiz ularni tekshirmoqda.',
+  'HUJJAT TAYYOR': 'Hujjatlaringiz universitetga topshirishga tayyorlandi.',
+  'UNIVERSITY 1 TOPSHIRILDI': 'Hujjatlaringiz birinchi universitetga topshirildi. Natijani kutmoqdamiz.',
+  'UNIVERSITY 2 TOPSHIRILDI': 'Hujjatlaringiz ikkinchi universitetga topshirildi. Natijani kutmoqdamiz.',
+  'QABUL QILINDI': 'Tabriklaymiz! Siz universitetga qabul qilindingiz. Keyingi qadam — kontrakt to\'lovi.',
+  'QABUL QILINMADI': 'Afsuski, bu safar qabul qilinmadingiz. Mas\'ul hodimimiz siz bilan bog\'lanib, keyingi imkoniyatlarni muhokama qiladi.',
+  "KONTRAKT TO'LADI": 'Kontrakt to\'lovingiz qabul qilindi. Endi viza hujjatlarini tayyorlash bosqichiga o\'tamiz.',
+  "KDB QO'YDI": 'KDB bank hisobingiz ochildi. Elchixona uchun hujjatlar tayyorlanmoqda.',
+  'COA OLDI': 'Universitetdan qabul hujjati (COA) olindi. Elchixonaga topshirishga tayyorlanmoqdamiz.',
+  'ELCHIXONA': 'Hujjatlaringiz elchixonaga topshirildi. Viza natijasini kutmoqdamiz.',
+  'VIZA TASDIQLANDI': 'Tabriklaymiz! Vizangiz tasdiqlandi. Endi aviabilet masalasiga o\'tamiz.',
+  'VIZA RAD QILINDI': 'Afsuski, viza rad etildi. Mas\'ul hodimimiz siz bilan bog\'lanib, keyingi qadamlarni muhokama qiladi.',
+  'SHARTNOMA BEKOR QILDI': 'Shartnomangiz bekor qilingan. Savollaringiz bo\'lsa, filialingizga murojaat qiling.',
+  'MUZLATDI': 'Jarayoningiz vaqtincha to\'xtatilgan. Qayta boshlash uchun filialingizga murojaat qiling.',
 };
 
-async function sendStudentStatus(chatId, rowNum) {
-  const rowData = await getRowData(rowNum);
-  const status = String(rowData.B || '').trim();
-  const contractId = rowData.D || '';
-  const fullName = rowData.E || '';
+/**
+ * Talabaga joriy holatini yuboradi. Ma'lumot DB sahifasidan olinadi
+ * (DRAFT emas). Agar DB'da qator topilmasa — talaba hali DB'ga
+ * o'tkazilmagan, DRAFT bosqichida ekani aytiladi.
+ */
+async function sendStudentStatus(chatId, contractId, draftRowNum) {
+  const dbRow = await findDbRowByContractId(contractId);
+
+  if (!dbRow) {
+    // DB'da hali yo'q — DRAFT bosqichida
+    let text = `Shartnoma: ${contractId}\n\n`;
+    text += 'Ma\'lumotlaringiz hali tekshiruvdan o\'tmoqda. ';
+    if (draftRowNum) {
+      try {
+        const d = await getRowData(draftRowNum);
+        const missing = getMissingDocs(d.AN, d.AF, d.AI);
+        if (!isComplete(missing)) {
+          text += `\n\nYetishmayotgan hujjatlar: ${missing.length} ta. Ularni yuborish uchun /hujjatlar buyrug'ini yuboring.`;
+        } else {
+          text += 'Barcha hujjatlaringiz qabul qilingan.';
+        }
+      } catch (e) { /* jim o'tkazamiz */ }
+    }
+    await sendMessage(chatId, text);
+    return;
+  }
+
+  const status = String(dbRow[DB_COL.STATUS] || '').trim();
+  const payment = String(dbRow[DB_COL.PAYMENT] || '').trim().toUpperCase();
+  const fullName = dbRow[DB_COL.FULL_NAME] || '';
+  const uni1 = dbRow[DB_COL.UNIVERSITY_1] || '';
+  const uni2 = dbRow[DB_COL.UNIVERSITY_2] || '';
+  const branch = dbRow[DB_COL.BRANCH] || '';
 
   let statusText = STATUS_MESSAGES[status.toUpperCase()];
   if (!statusText) {
     statusText = status
       ? `Joriy bosqich: ${status}`
-      : 'Holatingiz hali belgilanmagan. Ma\'lumotlaringizni to\'ldirishni yakunlang.';
+      : 'Holatingiz hali belgilanmagan. Savolingiz bo\'lsa, filialingizga murojaat qiling.';
   }
 
-  const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
   let text = `Shartnoma: ${contractId}\n`;
   if (fullName) text += `Ism: ${fullName}\n`;
+  if (branch) text += `Filial: ${branch}\n`;
   text += `\n${statusText}\n`;
 
-  if (!isComplete(missing)) {
-    text += `\nYetishmayotgan hujjatlar: ${missing.length} ta`;
+  if (uni1 || uni2) {
+    text += '\nUniversitetlar:';
+    if (uni1) text += `\n1) ${uni1}`;
+    if (uni2) text += `\n2) ${uni2}`;
+    text += '\n';
+  }
+
+  if (payment === 'DEBT') {
+    text += '\nTo\'lov holati: qisman to\'langan (qarzdorlik mavjud).';
+  } else if (payment === 'FULL') {
+    text += '\nTo\'lov holati: to\'liq to\'langan.';
+  } else if (payment === 'NOT PAID') {
+    text += '\nTo\'lov holati: hali to\'lov qilinmagan.';
   }
 
   await sendMessage(chatId, text);
@@ -589,7 +683,7 @@ app.post('/webhook', async (req, res) => {
         await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting (/start).');
         return res.sendStatus(200);
       }
-      await sendStudentStatus(chatId, s.row);
+      await sendStudentStatus(chatId, s.contractId, s.row);
       return res.sendStatus(200);
     }
 
@@ -987,7 +1081,7 @@ async function handleCallback(callback) {
       await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting (/start).');
       return;
     }
-    await sendStudentStatus(chatId, s.row);
+    await sendStudentStatus(chatId, s.contractId, s.row);
     return;
   }
   if (data === 'menu:viza') {
