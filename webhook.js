@@ -23,6 +23,9 @@ const {
   getMissingDocs, markDocReceived, isComplete,
   buildDocumentMenuKeyboard, buildBankStatementSubmenu, buildMissingDocsText,
   sendDocumentToGroup, DOCUMENT_TYPES, REQUIRED_DOCS, VISA_STAGE_DOCS,
+  PARENT_INCOME_CODES, MULTI_UPLOAD_CODES, MULTI_UPLOAD_MAX, NO_FILE_CODES,
+  buildParentIncomeSubmenu, buildMoreFilesKeyboard,
+  DOCUMENT_GROUP_CHAT_ID, DOCUMENT_TOPIC_ID,
 } = require('./documentCollection');
 
 const app = express();
@@ -354,6 +357,7 @@ function buildStudentMenuKeyboard() {  return {
       [{ text: '🆕 Boshlash / shartnoma ID', callback_data: 'menu:start' }],
       [{ text: '📄 Hujjatlar holati', callback_data: 'menu:docs' }],
       [{ text: '📊 Mening holatim', callback_data: 'menu:status' }],
+      [{ text: '🆘 Yordam kerak', callback_data: 'menu:yordam' }],
     ],
   };
 }
@@ -560,6 +564,14 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // --- /yordam: talaba yordam so'raydi, supervisor guruhiga signal ---
+    if (text === '/yordam') {
+      const s = userStates.get(chatId);
+      userStates.set(chatId, { ...(s || {}), mode: 'awaiting_help_text', helpPrev: s ? s.mode : null });
+      await sendMessage(chatId, 'Savolingizni yoki muammoingizni yozing — mas\'ul hodimimizga yetkazamiz:');
+      return res.sendStatus(200);
+    }
+
     // --- Funksiya menyusi (rol asosida farqlanadi) ---
     if (text === '/menu') {
       if (ADMIN_NOTIFY_CHAT_ID && String(chatId) === String(ADMIN_NOTIFY_CHAT_ID)) {
@@ -603,8 +615,38 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // --- Admin oqimi: viza bosqichi uchun shartnoma ID(lar) kutilmoqda ---
+    // --- Yordam matni kutilmoqda ---
     const session = userStates.get(chatId);
+    if (session && session.mode === 'awaiting_help_text') {
+      const helpText = text;
+      let contractId = session.contractId || 'noma\'lum';
+      let fullName = '';
+      let stage = '';
+
+      if (session.row) {
+        try {
+          const rowData = await getRowData(session.row);
+          fullName = rowData.E || '';
+          stage = rowData[CURRENT_STEP_COLUMN] || rowData.B || '';
+        } catch (e) { console.error('Yordam: qator o\'qishda xato', e); }
+      }
+
+      const msg = `🆘 TALABA YORDAM SO'RADI\n\n`
+        + `Shartnoma: ${contractId}\n`
+        + (fullName ? `Ism: ${fullName}\n` : '')
+        + (stage ? `Bosqich: ${stage}\n` : '')
+        + `Telegram: @${username || 'username yo\'q'}\n\n`
+        + `Savol: ${helpText}`;
+
+      await sendMessage(DOCUMENT_GROUP_CHAT_ID, msg, null, DOCUMENT_TOPIC_ID);
+
+      // Oldingi rejimga qaytarish (forma davom etsin)
+      userStates.set(chatId, { ...session, mode: session.helpPrev || 'in_form' });
+      await sendMessage(chatId, 'Savolingiz mas\'ul hodimimizga yuborildi. Tez orada siz bilan bog\'lanishadi.');
+      return res.sendStatus(200);
+    }
+
+    // --- Admin oqimi: viza bosqichi uchun shartnoma ID(lar) kutilmoqda ---
     if (session && session.mode === 'admin_visa_awaiting_id') {
       userStates.delete(chatId);
       const ids = text.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
@@ -773,10 +815,30 @@ app.post('/webhook', async (req, res) => {
       // xato chiqsa (masalan API kvota limiti), foydalanuvchi baribir
       // javob olishi kerak, jim qolmasligi kerak.
       try {
-        const rowData = await getRowData(session.row);
         await logDocument(contractId, docCode, fileType, fileId);
+
+        // Ko'p faylli hujjat (masalan mashina texnik passporti) —
+        // "yana bormi?" so'raladi, ro'yxat hali yangilanmaydi.
+        if (MULTI_UPLOAD_CODES.includes(docCode)) {
+          session.multiCount = (session.multiCount || 0) + 1;
+          userStates.set(chatId, session);
+          if (session.multiCount >= MULTI_UPLOAD_MAX) {
+            await sendMessage(chatId, `Qabul qilindi (${session.multiCount}/${MULTI_UPLOAD_MAX}). Chegaraga yetdingiz.`,
+              buildMoreFilesKeyboard(docCode));
+          } else {
+            await sendMessage(chatId, `Qabul qilindi (${session.multiCount}/${MULTI_UPLOAD_MAX}). Yana fayl yuborasizmi?`,
+              buildMoreFilesKeyboard(docCode));
+          }
+          return res.sendStatus(200);
+        }
+
+        // PARENT_INCOME ichidagi hujjatlar — ro'yxatda 'PARENT_INCOME'
+        // sifatida belgilanadi (ichki kodlar alohida sanalmaydi).
+        const markCode = PARENT_INCOME_CODES.includes(docCode) ? 'PARENT_INCOME' : docCode;
+
+        const rowData = await getRowData(session.row);
         const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
-        const { updatedList, cellValue } = markDocReceived(missing, docCode);
+        const { updatedList, cellValue } = markDocReceived(missing, markCode);
         await updateCell(`${DRAFT_SHEET}!AN${session.row}`, cellValue);
 
         if (isComplete(updatedList)) {
@@ -909,6 +971,13 @@ async function handleCallback(callback) {
     const rowData = await getRowData(s.row);
     const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
     await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
+    return;
+  }
+  if (data === 'menu:yordam') {
+    const s = userStates.get(chatId) || {};
+    userStates.set(chatId, { ...s, mode: 'awaiting_help_text', helpPrev: s.mode || null });
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, 'Savolingizni yoki muammoingizni yozing — mas\'ul hodimimizga yetkazamiz:');
     return;
   }
   if (data === 'menu:status') {
@@ -1077,6 +1146,44 @@ async function handleCallback(callback) {
     return;
   }
 
+  // --- Ko'p faylli hujjat: "Yana yuboraman" / "Tugadi" ---
+  if (data.startsWith('more:')) {
+    const code = data.substring(5);
+    const count = (session.multiCount || 0);
+    if (count >= MULTI_UPLOAD_MAX) {
+      answerCallbackQuery(callbackId, `Ko'pi bilan ${MULTI_UPLOAD_MAX} ta`);
+      return;
+    }
+    session.mode = 'awaiting_document';
+    session.docCode = code;
+    userStates.set(chatId, session);
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, `Keyingi faylni yuboring (${count + 1}/${MULTI_UPLOAD_MAX}):`);
+    return;
+  }
+  if (data.startsWith('moredone:')) {
+    answerCallbackQuery(callbackId, '');
+    session.multiCount = 0;
+    userStates.set(chatId, session);
+    try {
+      const rowData = await getRowData(session.row);
+      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+      const { updatedList, cellValue } = markDocReceived(missing, 'PARENT_INCOME');
+      await updateCell(`${DRAFT_SHEET}!AN${session.row}`, cellValue);
+      if (isComplete(updatedList)) {
+        await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
+        await sendFullDocumentSetToAdmin(session.contractId);
+        await sendMessage(chatId, 'Barcha hujjatlaringiz muvaffaqiyatli qabul qilindi!\n\nHujjatlaringiz tez orada tekshiriladi. Xato yoki kamchilik bo\'lsa, mas\'ul hodimimiz siz bilan bog\'lanadi.');
+      } else {
+        await sendMessage(chatId, 'Qabul qilindi.\n\n' + buildMissingDocsText(updatedList), buildDocumentMenuKeyboard(updatedList));
+      }
+    } catch (e) {
+      console.error('moredone xatosi:', e);
+      await sendMessage(chatId, 'Texnik nosozlik. /hujjatlar buyrug\'ini qayta yuboring.');
+    }
+    return;
+  }
+
   // --- Hujjat menyusi ---
   if (data.startsWith('doc:')) {
     const code = data.substring(4);
@@ -1086,6 +1193,33 @@ async function handleCallback(callback) {
       const rowData = await getRowData(session.row);
       const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
       await sendMessage(chatId, 'Qaysi bank statement turini yuborasiz?', buildBankStatementSubmenu(missing));
+      return;
+    }
+    // PARENT_INCOME tugmasi — ichki ierarxiya ochiladi (fayl so'ralmaydi)
+    if (code === 'PARENT_INCOME') {
+      await sendMessage(chatId, 'Ota-onangizning daromadi yoki mol-mulki bo\'yicha qaysi hujjatni yuborasiz?', buildParentIncomeSubmenu());
+      return;
+    }
+    // "Daromad/mol-mulk yo'q" — fayl so'ralmaydi, darhol bajarilgan
+    // deb belgilanadi.
+    if (NO_FILE_CODES.includes(code)) {
+      try {
+        const rowData = await getRowData(session.row);
+        const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+        const { updatedList, cellValue } = markDocReceived(missing, 'PARENT_INCOME');
+        await updateCell(`${DRAFT_SHEET}!AN${session.row}`, cellValue);
+        await logDocument(session.contractId, 'NO_ASSETS', 'none', '-');
+        if (isComplete(updatedList)) {
+          await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
+          await sendFullDocumentSetToAdmin(session.contractId);
+          await sendMessage(chatId, 'Qabul qilindi. Barcha hujjatlaringiz to\'liq!\n\nHujjatlaringiz tez orada tekshiriladi. Xato yoki kamchilik bo\'lsa, mas\'ul hodimimiz siz bilan bog\'lanadi.');
+        } else {
+          await sendMessage(chatId, 'Qabul qilindi.\n\n' + buildMissingDocsText(updatedList), buildDocumentMenuKeyboard(updatedList));
+        }
+      } catch (e) {
+        console.error('NO_ASSETS xatosi:', e);
+        await sendMessage(chatId, 'Texnik nosozlik. /hujjatlar buyrug\'ini qayta yuboring.');
+      }
       return;
     }
     if (code === 'status') {

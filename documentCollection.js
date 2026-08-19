@@ -40,7 +40,34 @@ const DOCUMENT_TYPES = [
   { code: 'KDB', label: 'KDB' },
   { code: 'BANK_STATEMENT_EMBASSY_PARENT', label: 'Ota-ona Bank statement (Elchixona uchun)' },
   { code: 'PARENT_INCOME', label: "Ota-ona yillik daromadi / mol-mulk hujjati" },
+  // PARENT_INCOME ichidagi ierarxiya (til sertifikati kabi)
+  { code: 'FATHER_INCOME', label: "Otangizning yillik daromadi" },
+  { code: 'MOTHER_INCOME', label: "Onangizning yillik daromadi" },
+  { code: 'HOUSE_KADASTR', label: "Uy kadastr ma'lumotnomasi" },
+  { code: 'CAR_TECH', label: "Mashina texnik passporti" },
+  { code: 'OTHER_ASSETS', label: 'Boshqa hujjatlar' },
+  { code: 'NO_ASSETS', label: "Daromad va mol-mulk mavjud emas" },
 ];
+
+// PARENT_INCOME tugmasi bosilganda chiqadigan ichki tugmalar
+const PARENT_INCOME_CODES = [
+  'FATHER_INCOME',
+  'MOTHER_INCOME',
+  'HOUSE_KADASTR',
+  'CAR_TECH',
+  'OTHER_ASSETS',
+  'NO_ASSETS',
+];
+
+// Bir nechta fayl yuborilishi mumkin bo'lgan hujjatlar (masalan
+// 3 tagacha mashina texnik passporti). Har yuborilgandan keyin bot
+// "yana bormi?" deb so'raydi.
+const MULTI_UPLOAD_CODES = ['CAR_TECH', 'OTHER_ASSETS'];
+const MULTI_UPLOAD_MAX = 3;
+
+// "Hech qanday daromad/mol-mulk yo'q" tanlansa, fayl so'ralmaydi —
+// PARENT_INCOME darhol bajarilgan deb belgilanadi.
+const NO_FILE_CODES = ['NO_ASSETS'];
 
 const BANK_STATEMENT_CODES = [
   'BANK_STATEMENT_UNIVERSITY',
@@ -67,7 +94,9 @@ const VISA_STAGE_DOCS = [
 // qilinadigan hujjatlar — shartli va viza bosqichi hujjatlarisiz.
 const BASE_REQUIRED_DOCS = DOCUMENT_TYPES
   .map((d) => d.code)
-  .filter((code) => !CONDITIONAL_DOCS.includes(code) && !VISA_STAGE_DOCS.includes(code));
+  .filter((code) => !CONDITIONAL_DOCS.includes(code)
+    && !VISA_STAGE_DOCS.includes(code)
+    && !PARENT_INCOME_CODES.includes(code));
 
 /**
  * Ota va ona holatiga qarab (NORMAL / DEAD / DIVORCED), BIRINCHI
@@ -134,11 +163,13 @@ function isComplete(missingList) {
 
 function buildDocumentMenuKeyboard(missingList) {
   const rows = [];
-  const nonBankMissing = missingList.filter((c) => !BANK_STATEMENT_CODES.includes(c));
   const bankMissing = missingList.filter((c) => BANK_STATEMENT_CODES.includes(c));
+  const nonBankMissing = missingList.filter((c) =>
+    !BANK_STATEMENT_CODES.includes(c) && !PARENT_INCOME_CODES.includes(c));
 
   for (const code of nonBankMissing) {
     const doc = DOCUMENT_TYPES.find((d) => d.code === code);
+    if (!doc) continue;
     rows.push([{ text: doc.label, callback_data: `doc:${code}` }]);
   }
 
@@ -148,6 +179,29 @@ function buildDocumentMenuKeyboard(missingList) {
 
   rows.push([{ text: 'Hujjatlar holatini ko\'rish', callback_data: 'doc:status' }]);
   return { inline_keyboard: rows };
+}
+
+function buildParentIncomeSubmenu() {
+  const labels = {
+    FATHER_INCOME: 'Otangizning yillik daromadi',
+    MOTHER_INCOME: 'Onangizning yillik daromadi',
+    HOUSE_KADASTR: "Uy kadastr ma'lumotnomasi",
+    CAR_TECH: 'Mashina texnik passporti',
+    OTHER_ASSETS: 'Boshqa hujjatlar',
+    NO_ASSETS: "Hech qanday daromad va mol-mulk mavjud emas",
+  };
+  const rows = PARENT_INCOME_CODES.map((code) => [{ text: labels[code], callback_data: `doc:${code}` }]);
+  rows.push([{ text: '\u2190 Orqaga', callback_data: 'doc:back' }]);
+  return { inline_keyboard: rows };
+}
+
+function buildMoreFilesKeyboard(code) {
+  return {
+    inline_keyboard: [[
+      { text: 'Yana yuboraman', callback_data: `more:${code}` },
+      { text: 'Tugadi \u2714\ufe0f', callback_data: `moredone:${code}` },
+    ]],
+  };
 }
 
 function buildBankStatementSubmenu(missingList) {
@@ -263,12 +317,18 @@ module.exports = {
   CONDITIONAL_DOCS,
   VISA_STAGE_DOCS,
   BANK_STATEMENT_CODES,
+  PARENT_INCOME_CODES,
+  MULTI_UPLOAD_CODES,
+  MULTI_UPLOAD_MAX,
+  NO_FILE_CODES,
   buildRequiredDocs,
   getMissingDocs,
   markDocReceived,
   isComplete,
   buildDocumentMenuKeyboard,
   buildBankStatementSubmenu,
+  buildParentIncomeSubmenu,
+  buildMoreFilesKeyboard,
   buildMissingDocsText,
   sendDocumentToGroup,
   DOCUMENT_GROUP_CHAT_ID,

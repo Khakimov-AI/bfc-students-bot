@@ -350,9 +350,15 @@ const STUDENT_STEPS = {
   },
   zip_code: {
     type: 'text',
-    question: 'Pochta indeksi (zip code)ni kiriting:',
+    question: 'Pochta indeksi (zip code) — bu yashash manzilingizga biriktirilgan 6 xonali raqam.\n\n'
+      + 'Qanday topish mumkin:\n'
+      + '\u2022 Pasportingizdagi propiska (ro\'yxatga olish) sahifasida yozilgan bo\'ladi\n'
+      + '\u2022 Yoki Google\'da qidiring: "Andijon tumani pochta indeksi"\n'
+      + '\u2022 Yoki mahalla qo\'mitasidan so\'rashingiz mumkin\n\n'
+      + 'NAMUNA: 170100\n\n'
+      + 'O\'zingizning pochta indeksingizni kiriting:',
     validate: validators.zipCode,
-    errorMsg: 'Zip code 5-6 raqamdan iborat bo\'lishi kerak.',
+    errorMsg: 'Pochta indeksi 5-6 ta raqamdan iborat bo\'lishi kerak (masalan: 170100). Qayta kiriting.',
     sheetCol: 'T', // ZIP CODE
     next: () => 'region',
   },
