@@ -581,8 +581,67 @@ async function sendStudentStatus(chatId, contractId, draftRowNum) {
 
 
 // ---------------------------------------------------------------------
-// FUNKSIYA MENYULARI (rol asosida farqlanadi)
+// DOIMIY TUGMALAR (Reply Keyboard) — ekran pastida turadi, har doim
+// ko'rinadi. Inline tugmalardan farqli, yo'qolib ketmaydi.
+// Tugma bosilganda oddiy MATN yuboriladi — shuning uchun quyidagi
+// yorliqlar handler ichida matn sifatida tekshiriladi.
 // ---------------------------------------------------------------------
+
+const BTN = {
+  DOCS: '📄 Hujjatlarim',
+  STATUS: '📊 Mening holatim',
+  HELP: '🆘 Yordam kerak',
+  RESTART: '🔄 Qaytadan boshlash',
+  // Admin
+  RETURN_DOC: '♻️ Hujjatni qaytarish',
+  GET_DOCS: '📥 Talaba hujjatlari',
+  VISA: '🛂 Viza bosqichi',
+  // Boss
+  REPORT: '📊 To\'liq hisobot',
+  SUMMARY: '🌙 Kunlik xulosa',
+};
+
+function studentReplyKeyboard() {
+  return {
+    keyboard: [
+      [{ text: BTN.DOCS }, { text: BTN.STATUS }],
+      [{ text: BTN.HELP }, { text: BTN.RESTART }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+function adminReplyKeyboard() {
+  return {
+    keyboard: [
+      [{ text: BTN.RETURN_DOC }, { text: BTN.GET_DOCS }],
+      [{ text: BTN.VISA }, { text: BTN.REPORT }],
+      [{ text: BTN.SUMMARY }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+function bossReplyKeyboard() {
+  return {
+    keyboard: [
+      [{ text: BTN.REPORT }, { text: BTN.SUMMARY }],
+      [{ text: BTN.GET_DOCS }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+function keyboardForUser(chatId) {
+  if (isBoss(chatId)) return bossReplyKeyboard();
+  if (isAdmin(chatId)) return adminReplyKeyboard();
+  return studentReplyKeyboard();
+}
+
+
 
 function buildStudentMenuKeyboard() {  return {
     inline_keyboard: [
@@ -849,19 +908,13 @@ app.post('/webhook', async (req, res) => {
 
     // --- Funksiya menyusi (rol asosida farqlanadi) ---
     if (text === '/menu') {
-      if (isBoss(chatId)) {
-        await sendMessage(chatId, 'Rahbariyat funksiyalari:', {
-          inline_keyboard: [
-            [{ text: '📊 To\'liq hisobot', callback_data: 'menu:hisobot' }],
-            [{ text: '🌙 Kunlik xulosa', callback_data: 'menu:xulosa' }],
-            [{ text: '📄 Talaba hujjatlarini olish', callback_data: 'menu:gethujjat' }],
-          ],
-        });
-      } else if (isAdmin(chatId)) {
-        await sendMessage(chatId, 'Admin funksiyalari:', buildAdminMenuKeyboard());
-      } else {
-        await sendMessage(chatId, 'Funksiyalar:', buildStudentMenuKeyboard());
-      }
+      // Doimiy tugmalarni (reply keyboard) qayta ko'rsatadi.
+      // Foydalanuvchi tugmalarni yashirib qo'ygan bo'lsa, shu bilan
+      // qaytariladi.
+      let label = 'Funksiyalar quyida:';
+      if (isBoss(chatId)) label = 'Rahbariyat funksiyalari quyida:';
+      else if (isAdmin(chatId)) label = 'Admin funksiyalari quyida:';
+      await sendMessage(chatId, label, keyboardForUser(chatId));
       return res.sendStatus(200);
     }
 
@@ -894,8 +947,105 @@ app.post('/webhook', async (req, res) => {
     // --- /start: shartnoma ID so'raladi ---
     if (text === '/start') {
       userStates.set(chatId, { mode: 'awaiting_id' });
-      await sendMessage(chatId, 'Assalomu alaykum! Biz bilan qilgan shartnoma raqamingizni kiriting:');
+      await sendMessage(chatId,
+        'Assalomu alaykum! Bright Future Consulting botiga xush kelibsiz.\n\n'
+        + 'Boshlash uchun biz bilan qilgan shartnoma raqamingizni kiriting:',
+        keyboardForUser(chatId));
       return res.sendStatus(200);
+    }
+
+    // =================================================================
+    // DOIMIY TUGMALAR — matn sifatida keladi. Bu blok forma
+    // mantig'idan OLDIN turadi, chunki talaba forma to'ldirayotganda
+    // ham tugmani bosishi mumkin.
+    // =================================================================
+    {
+      const s = userStates.get(chatId) || {};
+
+      if (text === BTN.RESTART) {
+        userStates.set(chatId, { mode: 'awaiting_id' });
+        await sendMessage(chatId, 'Shartnoma raqamingizni kiriting:', keyboardForUser(chatId));
+        return res.sendStatus(200);
+      }
+
+      if (text === BTN.HELP) {
+        userStates.set(chatId, { ...s, mode: 'awaiting_help_text', helpPrev: s.mode || null });
+        await sendMessage(chatId, 'Savolingizni yoki muammoingizni yozing — mas\'ul hodimimizga yetkazamiz:');
+        return res.sendStatus(200);
+      }
+
+      if (text === BTN.DOCS) {
+        if (!s.row) {
+          await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting.', keyboardForUser(chatId));
+          return res.sendStatus(200);
+        }
+        const rowData = await getRowData(s.row);
+        const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+        await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
+        return res.sendStatus(200);
+      }
+
+      if (text === BTN.STATUS) {
+        if (!s.contractId) {
+          await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting.', keyboardForUser(chatId));
+          return res.sendStatus(200);
+        }
+        await sendStudentStatus(chatId, s.contractId, s.row);
+        return res.sendStatus(200);
+      }
+
+      // ---- Admin / Boss tugmalari ----
+      if (text === BTN.REPORT || text === BTN.SUMMARY) {
+        if (!isBoss(chatId) && !isAdmin(chatId)) {
+          await sendMessage(chatId, 'Bu funksiya faqat rahbariyat uchun.');
+          return res.sendStatus(200);
+        }
+        await sendMessage(chatId, 'Tayyorlanmoqda, biroz kuting...');
+        try {
+          if (text === BTN.REPORT) {
+            const parts = await buildBossReport();
+            for (const p of parts) await sendMessage(chatId, p);
+          } else {
+            const sum = await buildDailySummary();
+            if (sum.length <= 4000) await sendMessage(chatId, sum);
+            else for (let i = 0; i < sum.length; i += 4000) await sendMessage(chatId, sum.slice(i, i + 4000));
+          }
+        } catch (e) {
+          console.error('Hisobot/xulosa xatosi:', e);
+          await sendMessage(chatId, 'Xatolik: ' + e.message);
+        }
+        return res.sendStatus(200);
+      }
+
+      if (text === BTN.RETURN_DOC) {
+        if (!isAdmin(chatId) && !isBoss(chatId)) {
+          await sendMessage(chatId, 'Bu funksiya faqat administrator uchun.');
+          return res.sendStatus(200);
+        }
+        userStates.set(chatId, { mode: 'admin_return_awaiting_id' });
+        await sendMessage(chatId, 'Qaysi talabaning hujjatlarini qaytarish kerak? Shartnoma raqamini kiriting:');
+        return res.sendStatus(200);
+      }
+
+      if (text === BTN.GET_DOCS) {
+        if (!isAdmin(chatId) && !isBoss(chatId)) {
+          await sendMessage(chatId, 'Bu funksiya faqat rahbariyat uchun.');
+          return res.sendStatus(200);
+        }
+        userStates.set(chatId, { mode: 'admin_get_docs_awaiting_id' });
+        await sendMessage(chatId, 'Qaysi talabaning hujjatlari kerak? Shartnoma raqamini kiriting:');
+        return res.sendStatus(200);
+      }
+
+      if (text === BTN.VISA) {
+        if (!isAdmin(chatId) && !isBoss(chatId)) {
+          await sendMessage(chatId, 'Bu funksiya faqat administrator uchun.');
+          return res.sendStatus(200);
+        }
+        userStates.set(chatId, { mode: 'admin_visa_awaiting_id' });
+        await sendMessage(chatId, 'Qaysi talaba viza bosqichiga o\'tdi? Shartnoma raqamini kiriting:\n\n(Bir nechta bo\'lsa, vergul bilan ajrating)');
+        return res.sendStatus(200);
+      }
     }
 
     // --- Yordam matni kutilmoqda ---
@@ -921,7 +1071,11 @@ app.post('/webhook', async (req, res) => {
         + `Telegram: @${username || 'username yo\'q'}\n\n`
         + `Savol: ${helpText}`;
 
-      await sendMessage(DOCUMENT_GROUP_CHAT_ID, msg, null, DOCUMENT_TOPIC_ID);
+      // General topic'ga yuboriladi — message_thread_id UZATILMAYDI.
+      // (Telegram'da General oqimi thread ID'siz ishlaydi; agar
+      // DOCUMENT_TOPIC_ID berilsa, xabar "Original hujjatlar"
+      // topic'iga tushib qoladi.)
+      await sendMessage(DOCUMENT_GROUP_CHAT_ID, msg);
 
       // Oldingi rejimga qaytarish (forma davom etsin)
       userStates.set(chatId, { ...session, mode: session.helpPrev || 'in_form' });
@@ -1035,7 +1189,7 @@ app.post('/webhook', async (req, res) => {
         await sendWelcomeVideo(chatId);
       }
 
-      await sendMessage(chatId, 'Shartnoma tasdiqlandi. Ma\'lumot kiritishni boshlaymiz.');
+      await sendMessage(chatId, 'Shartnoma tasdiqlandi. Ma\'lumot kiritishni boshlaymiz.', keyboardForUser(chatId));
       await renderStep(chatId, rowNum, stepKey, {});
       return res.sendStatus(200);
     }
@@ -1440,7 +1594,10 @@ async function handleCallback(callback) {
   if (data === 'confirm:yes') {
     await updateCell(`${DRAFT_SHEET}!B${session.row}`, 'MA\'LUMOT TASDIQLANDI');
     answerCallbackQuery(callbackId, 'Tasdiqlandi');
-    await sendMessage(chatId, 'Ma\'lumotlaringiz tasdiqlandi. Endi kerakli hujjatlarni yuborishingiz kerak. /hujjatlar buyrug\'ini yuboring.');
+    await sendMessage(chatId,
+      'Ma\'lumotlaringiz tasdiqlandi!\n\nEndi kerakli hujjatlarni yuborishingiz kerak. '
+      + 'Pastdagi "📄 Hujjatlarim" tugmasini bosing.',
+      keyboardForUser(chatId));
     return;
   }
   if (data === 'confirm:edit') {
