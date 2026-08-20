@@ -37,9 +37,10 @@ const SHEET_ID = process.env.SHEET_ID;
 const DRAFT_SHEET = 'DRAFT';
 const DB_SHEET = 'DB'; // asosiy ma'lumot ombori (journey/status manbai)
 const DOCUMENTS_LOG_SHEET = 'DOCUMENT_LOG';
-const FAQ_SHEET = 'FAQ';           // A:savol B:javob
-const BRANCHES_SHEET = 'BRANCHES'; // A:nom B:manzil C:latitude D:longitude
-const CONTACTS_SHEET = 'CONTACTS'; // A:ism B:lavozim C:telefon // A:timestamp B:contractId C:docCode D:fileType E:fileId
+const FAQ_SHEET = 'FAQ';            // A:№ B:SAVOL C:JAVOB D:KIM KIRITDI
+const BRANCHES_SHEET = 'LOCATION';  // A:BRANCH NAME B:ADRESS C:LATITUDE D:LONGITUDE
+const CONTACTS_SHEET = 'CONTACTS';  // A:NAME B:POSITION C:PHONE
+const COMPLAINTS_SHEET = 'COMPLAINTS'; // A:sana B:shartnoma C:ism D:username E:matn // A:timestamp B:contractId C:docCode D:fileType E:fileId
 
 const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
 const auth = new google.auth.GoogleAuth({
@@ -613,6 +614,7 @@ const BTN = {
   BRANCHES: '📍 Filiallarimiz',
   CONTACTS: '☎️ Aloqa',
   FAQ_EDIT: '✏️ FAQ tahrirlash',
+  COMPLAINT: '📣 E\'tiroz va shikoyatlar',
   // Admin
   RETURN_DOC: '♻️ Hujjatni qaytarish',
   GET_DOCS: '📥 Talaba hujjatlari',
@@ -628,6 +630,7 @@ function studentReplyKeyboard() {
       [{ text: BTN.DOCS }, { text: BTN.STATUS }],
       [{ text: BTN.FAQ }, { text: BTN.HELP }],
       [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
+      [{ text: BTN.COMPLAINT }],
       [{ text: BTN.GUIDE }, { text: BTN.RESTART }],
     ],
     resize_keyboard: true,
@@ -692,6 +695,10 @@ const STUDENT_COMMANDS = [
   { command: 'hujjatlar', description: 'Hujjatlarni yuborish va holatini ko\'rish' },
   { command: 'status', description: 'Jarayondagi joriy bosqichim' },
   { command: 'yordam', description: 'Mas\'ul hodimga savol yuborish' },
+  { command: 'shikoyat', description: 'E\'tiroz va shikoyat bildirish' },
+  { command: 'filiallar', description: 'Filiallarimiz manzillari' },
+  { command: 'aloqa', description: 'Hodimlar telefon raqamlari' },
+  { command: 'savollar', description: 'Ko\'p so\'raladigan savollar' },
   { command: 'qollanma', description: 'Botdan qanday foydalanish' },
   { command: 'menu', description: 'Tugmalarni qayta ko\'rsatish' },
 ];
@@ -837,18 +844,20 @@ function guideForUser(chatId) {
 // =====================================================================
 
 async function getFaqList() {
-  const rows = await readSheetRange(`${FAQ_SHEET}!A2:B200`) || [];
+  // FAQ ustunlari: A:№ B:SAVOL C:JAVOB D:KIM KIRITDI
+  const rows = await readSheetRange(`${FAQ_SHEET}!A2:D200`) || [];
   const list = [];
   // MUHIM: haqiqiy Sheet qator raqamini saqlaymiz (bo'sh qatorlar
   // o'tkazib yuborilganda ham). Aks holda o'chirishda noto'g'ri
   // qator tozalanadi.
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    if (!r || !String(r[0] || '').trim()) continue;
+    if (!r || !String(r[1] || '').trim()) continue; // B = SAVOL
     list.push({
-      row: i + 2, // A2 dan boshlangani uchun
-      question: String(r[0]).trim(),
-      answer: String(r[1] || '').trim(),
+      row: i + 2,
+      question: String(r[1]).trim(),
+      answer: String(r[2] || '').trim(), // C = JAVOB
+      author: String(r[3] || '').trim(), // D = KIM KIRITDI
     });
   }
   return list;
@@ -1098,7 +1107,7 @@ app.post('/webhook', async (req, res) => {
     if (!message.text && !message.document && !message.photo && !message.video) return res.sendStatus(200);
 
     const chatId = message.chat.id;
-    const text = (message.text || '').trim();
+    let text = (message.text || '').trim();
     const username = message.from.username || '';
 
     // --- ADMIN: /viza — talaba viza bosqichiga o'tdi, endi KDB va
@@ -1178,6 +1187,12 @@ app.post('/webhook', async (req, res) => {
     }
 
     // --- Funksiya menyusi (rol asosida farqlanadi) ---
+    // --- Matnli buyruqlar tugma yorliqlariga yo'naltiriladi ---
+    if (text === '/shikoyat') text = BTN.COMPLAINT;
+    else if (text === '/filiallar') text = BTN.BRANCHES;
+    else if (text === '/aloqa') text = BTN.CONTACTS;
+    else if (text === '/savollar' || text === '/faq') text = BTN.FAQ;
+
     // --- /qollanma: funksiyalar bo'yicha yo'riqnoma ---
     if (text === '/qollanma' || text === '/yoriqnoma') {
       await sendMessage(chatId, guideForUser(chatId), keyboardForUser(chatId));
@@ -1244,6 +1259,16 @@ app.post('/webhook', async (req, res) => {
     // =================================================================
     {
       const s = userStates.get(chatId) || {};
+
+      if (text === BTN.COMPLAINT) {
+        const s2 = userStates.get(chatId) || {};
+        userStates.set(chatId, { ...s2, mode: 'awaiting_complaint', complaintPrev: s2.mode || null });
+        await sendMessage(chatId,
+          'Bu bildiradigan bizning kompaniyamiz haqidagi har qanday o\'rinli e\'tiroz va '
+          + 'shikoyatlarni albatta ko\'rib chiqamiz va qoniqarli hal qilishga harakat qilamiz!\n\n'
+          + 'E\'tiroz yoki shikoyatingizni yozing:');
+        return res.sendStatus(200);
+      }
 
       if (text === BTN.FAQ) {
         const faqs = await getFaqList();
@@ -1426,7 +1451,11 @@ app.post('/webhook', async (req, res) => {
     }
     if (session && session.mode === 'faq_add_answer') {
       try {
-        await appendRow(`${FAQ_SHEET}!A:B`, [session.pendingQuestion, text]);
+        const faqs = await getFaqList();
+        const nextNum = faqs.length + 1;
+        const author = username ? `@${username}` : String(chatId);
+        // A:№ B:SAVOL C:JAVOB D:KIM KIRITDI
+        await appendRow(`${FAQ_SHEET}!A:D`, [nextNum, session.pendingQuestion, text, author]);
         userStates.set(chatId, { ...session, mode: null, pendingQuestion: null });
         await sendMessage(chatId, 'Yangi savol-javob qo\'shildi ✅', keyboardForUser(chatId));
       } catch (e) {
@@ -1446,14 +1475,55 @@ app.post('/webhook', async (req, res) => {
         const target = faqs[idx - 1];
         // Qatorni bo'shatamiz (o'chirish o'rniga tozalash — boshqa
         // qatorlar siljimasligi uchun xavfsizroq)
-        await updateCell(`${FAQ_SHEET}!A${target.row}`, '');
-        await updateCell(`${FAQ_SHEET}!B${target.row}`, '');
+        for (const col of ['A', 'B', 'C', 'D']) {
+          await updateCell(`${FAQ_SHEET}!${col}${target.row}`, '');
+        }
         userStates.set(chatId, { ...session, mode: null });
         await sendMessage(chatId, `"${target.question}" o'chirildi ✅`, keyboardForUser(chatId));
       } catch (e) {
         console.error('FAQ o\'chirish xatosi:', e);
         await sendMessage(chatId, 'O\'chirishda xatolik: ' + e.message);
       }
+      return res.sendStatus(200);
+    }
+
+    // --- E'tiroz va shikoyat matni kutilmoqda ---
+    if (session && session.mode === 'awaiting_complaint') {
+      const complaintText = text;
+      let contractId = session.contractId || '';
+      let fullName = '';
+      if (session.row) {
+        try {
+          const rowData = await getRowData(session.row);
+          fullName = rowData.E || '';
+        } catch (e) { /* jim */ }
+      }
+
+      // 1) Sheet'ga yozib qo'yamiz (tahlil uchun)
+      try {
+        await appendRow(`${COMPLAINTS_SHEET}!A:E`, [
+          new Date().toISOString(), contractId, fullName,
+          username ? `@${username}` : String(chatId), complaintText,
+        ]);
+      } catch (e) {
+        console.error('Shikoyat yozishda xato (sheet):', e);
+      }
+
+      // 2) Rahbariyatga darhol yuboramiz
+      const notice = `📣 E'TIROZ / SHIKOYAT\n\n`
+        + (contractId ? `Shartnoma: ${contractId}\n` : '')
+        + (fullName ? `Ism: ${fullName}\n` : '')
+        + `Telegram: @${username || 'yo\'q'}\n\n`
+        + `Matn: ${complaintText}`;
+      if (BOSS_CHAT_ID) await sendMessage(BOSS_CHAT_ID, notice);
+      if (ADMIN_NOTIFY_CHAT_ID && String(ADMIN_NOTIFY_CHAT_ID) !== String(BOSS_CHAT_ID)) {
+        await sendMessage(ADMIN_NOTIFY_CHAT_ID, notice);
+      }
+
+      userStates.set(chatId, { ...session, mode: session.complaintPrev || 'in_form' });
+      await sendMessage(chatId,
+        'Murojaatingiz qabul qilindi. Rahbariyatimizga yetkazildi — albatta ko\'rib chiqamiz.',
+        keyboardForUser(chatId));
       return res.sendStatus(200);
     }
 
