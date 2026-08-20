@@ -40,7 +40,7 @@ const DOCUMENTS_LOG_SHEET = 'DOCUMENT_LOG';
 const FAQ_SHEET = 'FAQ';            // A:№ B:SAVOL C:JAVOB D:KIM KIRITDI
 const BRANCHES_SHEET = 'LOCATION';  // A:BRANCH NAME B:ADRESS C:LATITUDE D:LONGITUDE
 const CONTACTS_SHEET = 'CONTACTS';  // A:NAME B:POSITION C:PHONE
-const COMPLAINTS_SHEET = 'COMPLAINTS'; // A:sana B:shartnoma C:ism D:username E:matn // A:timestamp B:contractId C:docCode D:fileType E:fileId
+const COMPLAINTS_SHEET = 'COMPLAINTS'; // A:№ B:DATE C:ID D:NAME E:USERNAME F:MATN // A:timestamp B:contractId C:docCode D:fileType E:fileId
 
 const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
 const auth = new google.auth.GoogleAuth({
@@ -1500,9 +1500,15 @@ app.post('/webhook', async (req, res) => {
       }
 
       // 1) Sheet'ga yozib qo'yamiz (tahlil uchun)
+      // Ustunlar: A:№ B:DATE C:ID D:NAME E:USERNAME F:MATN
       try {
-        await appendRow(`${COMPLAINTS_SHEET}!A:E`, [
-          new Date().toISOString(), contractId, fullName,
+        const existing = await readSheetRange(`${COMPLAINTS_SHEET}!B2:B2000`) || [];
+        const nextNum = existing.filter((r) => r && String(r[0] || '').trim()).length + 1;
+        const now = new Date();
+        const tashkent = new Date(now.getTime() + 5 * 3600000);
+        const dateStr = tashkent.toISOString().slice(0, 16).replace('T', ' ');
+        await appendRow(`${COMPLAINTS_SHEET}!A:F`, [
+          nextNum, dateStr, contractId, fullName,
           username ? `@${username}` : String(chatId), complaintText,
         ]);
       } catch (e) {
@@ -1518,6 +1524,13 @@ app.post('/webhook', async (req, res) => {
       if (BOSS_CHAT_ID) await sendMessage(BOSS_CHAT_ID, notice);
       if (ADMIN_NOTIFY_CHAT_ID && String(ADMIN_NOTIFY_CHAT_ID) !== String(BOSS_CHAT_ID)) {
         await sendMessage(ADMIN_NOTIFY_CHAT_ID, notice);
+      }
+      // Supervisorlarga ham yuboriladi (ular mijoz bilan bevosita
+      // ishlaydi, shuning uchun tezroq javob bera oladi)
+      for (const supId of SUPERVISOR_CHAT_IDS) {
+        if (String(supId) === String(BOSS_CHAT_ID)) continue;
+        if (String(supId) === String(ADMIN_NOTIFY_CHAT_ID)) continue;
+        await sendMessage(supId, notice);
       }
 
       userStates.set(chatId, { ...session, mode: session.complaintPrev || 'in_form' });
