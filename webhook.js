@@ -36,7 +36,10 @@ const BOT_TOKEN = process.env.STUDENT_BOT_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
 const DRAFT_SHEET = 'DRAFT';
 const DB_SHEET = 'DB'; // asosiy ma'lumot ombori (journey/status manbai)
-const DOCUMENTS_LOG_SHEET = 'DOCUMENT_LOG'; // A:timestamp B:contractId C:docCode D:fileType E:fileId
+const DOCUMENTS_LOG_SHEET = 'DOCUMENT_LOG';
+const FAQ_SHEET = 'FAQ';           // A:savol B:javob
+const BRANCHES_SHEET = 'BRANCHES'; // A:nom B:manzil C:latitude D:longitude
+const CONTACTS_SHEET = 'CONTACTS'; // A:ism B:lavozim C:telefon // A:timestamp B:contractId C:docCode D:fileType E:fileId
 
 const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
 const auth = new google.auth.GoogleAuth({
@@ -167,6 +170,19 @@ function isAdmin(chatId) {
 }
 function isBoss(chatId) {
   return BOSS_CHAT_ID && String(chatId) === String(BOSS_CHAT_ID);
+}
+
+// Supervisorlar — vergul bilan ajratilgan chat_id ro'yxati.
+// Masalan: SUPERVISOR_CHAT_IDS=123456,789012
+const SUPERVISOR_CHAT_IDS = String(process.env.SUPERVISOR_CHAT_IDS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+function isSupervisor(chatId) {
+  return SUPERVISOR_CHAT_IDS.includes(String(chatId));
+}
+/** FAQ tahrirlash huquqi: supervisor, admin yoki boss */
+function canEditFaq(chatId) {
+  return isSupervisor(chatId) || isAdmin(chatId) || isBoss(chatId);
 }
 const WELCOME_VIDEO_FILE_ID = process.env.WELCOME_VIDEO_FILE_ID; // /setvideo orqali olinadi
 
@@ -593,6 +609,10 @@ const BTN = {
   HELP: '🆘 Yordam kerak',
   RESTART: '🔄 Qaytadan boshlash',
   GUIDE: '📖 Qo\'llanma',
+  FAQ: '❓ Savol-javob',
+  BRANCHES: '📍 Filiallarimiz',
+  CONTACTS: '☎️ Aloqa',
+  FAQ_EDIT: '✏️ FAQ tahrirlash',
   // Admin
   RETURN_DOC: '♻️ Hujjatni qaytarish',
   GET_DOCS: '📥 Talaba hujjatlari',
@@ -606,8 +626,9 @@ function studentReplyKeyboard() {
   return {
     keyboard: [
       [{ text: BTN.DOCS }, { text: BTN.STATUS }],
-      [{ text: BTN.HELP }, { text: BTN.RESTART }],
-      [{ text: BTN.GUIDE }],
+      [{ text: BTN.FAQ }, { text: BTN.HELP }],
+      [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
+      [{ text: BTN.GUIDE }, { text: BTN.RESTART }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -619,7 +640,9 @@ function adminReplyKeyboard() {
     keyboard: [
       [{ text: BTN.RETURN_DOC }, { text: BTN.GET_DOCS }],
       [{ text: BTN.VISA }, { text: BTN.REPORT }],
-      [{ text: BTN.SUMMARY }, { text: BTN.GUIDE }],
+      [{ text: BTN.SUMMARY }, { text: BTN.FAQ_EDIT }],
+      [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
+      [{ text: BTN.GUIDE }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -630,7 +653,21 @@ function bossReplyKeyboard() {
   return {
     keyboard: [
       [{ text: BTN.REPORT }, { text: BTN.SUMMARY }],
-      [{ text: BTN.GET_DOCS }, { text: BTN.GUIDE }],
+      [{ text: BTN.GET_DOCS }, { text: BTN.FAQ_EDIT }],
+      [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
+      [{ text: BTN.GUIDE }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+function supervisorReplyKeyboard() {
+  return {
+    keyboard: [
+      [{ text: BTN.FAQ_EDIT }, { text: BTN.GET_DOCS }],
+      [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
+      [{ text: BTN.FAQ }, { text: BTN.GUIDE }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -640,6 +677,7 @@ function bossReplyKeyboard() {
 function keyboardForUser(chatId) {
   if (isBoss(chatId)) return bossReplyKeyboard();
   if (isAdmin(chatId)) return adminReplyKeyboard();
+  if (isSupervisor(chatId)) return supervisorReplyKeyboard();
   return studentReplyKeyboard();
 }
 
@@ -791,6 +829,87 @@ function guideForUser(chatId) {
   if (isBoss(chatId)) return BOSS_GUIDE;
   if (isAdmin(chatId)) return ADMIN_GUIDE;
   return STUDENT_GUIDE;
+}
+
+// =====================================================================
+// FAQ — ko'p so'raluvchi savollar. Manba: FAQ sahifasi (A:savol B:javob).
+// Supervisorlar bot orqali yoki to'g'ridan-to'g'ri Sheet'da tahrirlaydi.
+// =====================================================================
+
+async function getFaqList() {
+  const rows = await readSheetRange(`${FAQ_SHEET}!A2:B200`) || [];
+  const list = [];
+  // MUHIM: haqiqiy Sheet qator raqamini saqlaymiz (bo'sh qatorlar
+  // o'tkazib yuborilganda ham). Aks holda o'chirishda noto'g'ri
+  // qator tozalanadi.
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !String(r[0] || '').trim()) continue;
+    list.push({
+      row: i + 2, // A2 dan boshlangani uchun
+      question: String(r[0]).trim(),
+      answer: String(r[1] || '').trim(),
+    });
+  }
+  return list;
+}
+
+function buildFaqKeyboard(faqs) {
+  const rows = faqs.slice(0, 30).map((f, i) => [{
+    text: f.question.length > 60 ? f.question.slice(0, 57) + '...' : f.question,
+    callback_data: `faq:${i}`,
+  }]);
+  return { inline_keyboard: rows };
+}
+
+// =====================================================================
+// FILIALLAR — manzil + lokatsiya. Manba: BRANCHES sahifasi.
+// =====================================================================
+
+async function getBranches() {
+  const rows = await readSheetRange(`${BRANCHES_SHEET}!A2:D50`) || [];
+  return rows
+    .filter((r) => r && String(r[0] || '').trim())
+    .map((r) => ({
+      name: String(r[0]).trim(),
+      address: String(r[1] || '').trim(),
+      lat: parseFloat(String(r[2] || '').replace(',', '.')),
+      lng: parseFloat(String(r[3] || '').replace(',', '.')),
+    }));
+}
+
+function buildBranchesKeyboard(branches) {
+  return {
+    inline_keyboard: branches.slice(0, 20).map((b, i) => [{ text: b.name, callback_data: `branch:${i}` }]),
+  };
+}
+
+function sendLocation(chatId, lat, lng) {
+  return telegramApi('sendLocation', { chat_id: chatId, latitude: lat, longitude: lng });
+}
+
+// =====================================================================
+// ALOQA — hodimlar telefon raqamlari. Manba: CONTACTS sahifasi.
+// =====================================================================
+
+async function getContacts() {
+  const rows = await readSheetRange(`${CONTACTS_SHEET}!A2:C100`) || [];
+  return rows
+    .filter((r) => r && String(r[0] || '').trim())
+    .map((r) => ({
+      name: String(r[0]).trim(),
+      role: String(r[1] || '').trim(),
+      phone: String(r[2] || '').trim(),
+    }));
+}
+
+function buildContactsKeyboard(contacts) {
+  return {
+    inline_keyboard: contacts.slice(0, 30).map((c, i) => [{
+      text: c.role ? `${c.name} — ${c.role}` : c.name,
+      callback_data: `contact:${i}`,
+    }]),
+  };
 }
 
 
@@ -1126,6 +1245,53 @@ app.post('/webhook', async (req, res) => {
     {
       const s = userStates.get(chatId) || {};
 
+      if (text === BTN.FAQ) {
+        const faqs = await getFaqList();
+        if (faqs.length === 0) {
+          await sendMessage(chatId, 'Hozircha savol-javob ro\'yxati bo\'sh.', keyboardForUser(chatId));
+          return res.sendStatus(200);
+        }
+        await sendMessage(chatId, 'Ko\'p so\'raladigan savollar — qiziqtirgan savolni tanlang:', buildFaqKeyboard(faqs));
+        return res.sendStatus(200);
+      }
+
+      if (text === BTN.BRANCHES) {
+        const branches = await getBranches();
+        if (branches.length === 0) {
+          await sendMessage(chatId, 'Filiallar ro\'yxati hozircha kiritilmagan.', keyboardForUser(chatId));
+          return res.sendStatus(200);
+        }
+        await sendMessage(chatId, 'Filiallarimiz — kerakli filialni tanlang:', buildBranchesKeyboard(branches));
+        return res.sendStatus(200);
+      }
+
+      if (text === BTN.CONTACTS) {
+        const contacts = await getContacts();
+        if (contacts.length === 0) {
+          await sendMessage(chatId, 'Aloqa ma\'lumotlari hozircha kiritilmagan.', keyboardForUser(chatId));
+          return res.sendStatus(200);
+        }
+        await sendMessage(chatId, 'Kimga bog\'lanmoqchisiz? Tanlang:', buildContactsKeyboard(contacts));
+        return res.sendStatus(200);
+      }
+
+      if (text === BTN.FAQ_EDIT) {
+        if (!canEditFaq(chatId)) {
+          await sendMessage(chatId, 'Bu funksiya faqat supervisorlar uchun.');
+          return res.sendStatus(200);
+        }
+        const faqs = await getFaqList();
+        let listText = `FAQ ro'yxati (${faqs.length} ta savol):\n\n`;
+        listText += faqs.map((f, i) => `${i + 1}. ${f.question}`).join('\n') || '(bo\'sh)';
+        await sendMessage(chatId, listText, {
+          inline_keyboard: [
+            [{ text: '➕ Yangi savol qo\'shish', callback_data: 'faqedit:add' }],
+            [{ text: '🗑 Savolni o\'chirish', callback_data: 'faqedit:del' }],
+          ],
+        });
+        return res.sendStatus(200);
+      }
+
       if (text === BTN.GUIDE) {
         await sendMessage(chatId, guideForUser(chatId), keyboardForUser(chatId));
         return res.sendStatus(200);
@@ -1249,6 +1415,45 @@ app.post('/webhook', async (req, res) => {
       // Oldingi rejimga qaytarish (forma davom etsin)
       userStates.set(chatId, { ...session, mode: session.helpPrev || 'in_form' });
       await sendMessage(chatId, 'Savolingiz mas\'ul hodimimizga yuborildi. Tez orada siz bilan bog\'lanishadi.');
+      return res.sendStatus(200);
+    }
+
+    // --- FAQ tahrirlash oqimi (supervisor) ---
+    if (session && session.mode === 'faq_add_question') {
+      userStates.set(chatId, { ...session, mode: 'faq_add_answer', pendingQuestion: text });
+      await sendMessage(chatId, 'Endi shu savolga JAVOBNI yozing:');
+      return res.sendStatus(200);
+    }
+    if (session && session.mode === 'faq_add_answer') {
+      try {
+        await appendRow(`${FAQ_SHEET}!A:B`, [session.pendingQuestion, text]);
+        userStates.set(chatId, { ...session, mode: null, pendingQuestion: null });
+        await sendMessage(chatId, 'Yangi savol-javob qo\'shildi ✅', keyboardForUser(chatId));
+      } catch (e) {
+        console.error('FAQ qo\'shish xatosi:', e);
+        await sendMessage(chatId, 'Saqlashda xatolik: ' + e.message);
+      }
+      return res.sendStatus(200);
+    }
+    if (session && session.mode === 'faq_delete_number') {
+      const idx = parseInt(text.trim(), 10);
+      const faqs = await getFaqList();
+      if (isNaN(idx) || idx < 1 || idx > faqs.length) {
+        await sendMessage(chatId, `Noto'g'ri raqam. 1 dan ${faqs.length} gacha son kiriting.`);
+        return res.sendStatus(200);
+      }
+      try {
+        const target = faqs[idx - 1];
+        // Qatorni bo'shatamiz (o'chirish o'rniga tozalash — boshqa
+        // qatorlar siljimasligi uchun xavfsizroq)
+        await updateCell(`${FAQ_SHEET}!A${target.row}`, '');
+        await updateCell(`${FAQ_SHEET}!B${target.row}`, '');
+        userStates.set(chatId, { ...session, mode: null });
+        await sendMessage(chatId, `"${target.question}" o'chirildi ✅`, keyboardForUser(chatId));
+      } catch (e) {
+        console.error('FAQ o\'chirish xatosi:', e);
+        await sendMessage(chatId, 'O\'chirishda xatolik: ' + e.message);
+      }
       return res.sendStatus(200);
     }
 
@@ -1547,6 +1752,66 @@ async function handleCallback(callback) {
   const chatId = callback.message.chat.id;
   const data = callback.data;
   const callbackId = callback.id;
+
+  // --- FAQ: savol tanlandi ---
+  if (data.startsWith('faq:')) {
+    const idx = parseInt(data.substring(4), 10);
+    answerCallbackQuery(callbackId, '');
+    const faqs = await getFaqList();
+    const f = faqs[idx];
+    if (!f) {
+      await sendMessage(chatId, 'Savol topilmadi.');
+      return;
+    }
+    await sendMessage(chatId, `❓ ${f.question}\n\n${f.answer || '(javob hali kiritilmagan)'}`);
+    return;
+  }
+
+  // --- FAQ tahrirlash ---
+  if (data === 'faqedit:add') {
+    if (!canEditFaq(chatId)) { answerCallbackQuery(callbackId, 'Ruxsat yo\'q.'); return; }
+    const s = userStates.get(chatId) || {};
+    userStates.set(chatId, { ...s, mode: 'faq_add_question' });
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, 'Yangi SAVOLNI yozing:');
+    return;
+  }
+  if (data === 'faqedit:del') {
+    if (!canEditFaq(chatId)) { answerCallbackQuery(callbackId, 'Ruxsat yo\'q.'); return; }
+    const s = userStates.get(chatId) || {};
+    userStates.set(chatId, { ...s, mode: 'faq_delete_number' });
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, 'O\'chirmoqchi bo\'lgan savolning RAQAMINI yozing:');
+    return;
+  }
+
+  // --- Filial tanlandi: manzil matn + lokatsiya ---
+  if (data.startsWith('branch:')) {
+    const idx = parseInt(data.substring(7), 10);
+    answerCallbackQuery(callbackId, '');
+    const branches = await getBranches();
+    const b = branches[idx];
+    if (!b) { await sendMessage(chatId, 'Filial topilmadi.'); return; }
+    await sendMessage(chatId, `📍 ${b.name}\n\n${b.address || 'Manzil kiritilmagan'}`);
+    if (!isNaN(b.lat) && !isNaN(b.lng)) {
+      await sendLocation(chatId, b.lat, b.lng);
+    }
+    return;
+  }
+
+  // --- Aloqa: hodim tanlandi ---
+  if (data.startsWith('contact:')) {
+    const idx = parseInt(data.substring(8), 10);
+    answerCallbackQuery(callbackId, '');
+    const contacts = await getContacts();
+    const c = contacts[idx];
+    if (!c) { await sendMessage(chatId, 'Ma\'lumot topilmadi.'); return; }
+    let t = `👤 ${c.name}`;
+    if (c.role) t += `\n${c.role}`;
+    t += `\n\n☎️ ${c.phone || 'raqam kiritilmagan'}`;
+    await sendMessage(chatId, t);
+    return;
+  }
 
   // --- Guruh menyusi: "Hujjat so'rash" tugmasi ---
   if (data === 'groupmenu:hujjat') {
