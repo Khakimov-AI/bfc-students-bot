@@ -592,6 +592,7 @@ const BTN = {
   STATUS: '📊 Mening holatim',
   HELP: '🆘 Yordam kerak',
   RESTART: '🔄 Qaytadan boshlash',
+  GUIDE: '📖 Qo\'llanma',
   // Admin
   RETURN_DOC: '♻️ Hujjatni qaytarish',
   GET_DOCS: '📥 Talaba hujjatlari',
@@ -606,6 +607,7 @@ function studentReplyKeyboard() {
     keyboard: [
       [{ text: BTN.DOCS }, { text: BTN.STATUS }],
       [{ text: BTN.HELP }, { text: BTN.RESTART }],
+      [{ text: BTN.GUIDE }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -617,7 +619,7 @@ function adminReplyKeyboard() {
     keyboard: [
       [{ text: BTN.RETURN_DOC }, { text: BTN.GET_DOCS }],
       [{ text: BTN.VISA }, { text: BTN.REPORT }],
-      [{ text: BTN.SUMMARY }],
+      [{ text: BTN.SUMMARY }, { text: BTN.GUIDE }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -628,7 +630,7 @@ function bossReplyKeyboard() {
   return {
     keyboard: [
       [{ text: BTN.REPORT }, { text: BTN.SUMMARY }],
-      [{ text: BTN.GET_DOCS }],
+      [{ text: BTN.GET_DOCS }, { text: BTN.GUIDE }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -639,6 +641,156 @@ function keyboardForUser(chatId) {
   if (isBoss(chatId)) return bossReplyKeyboard();
   if (isAdmin(chatId)) return adminReplyKeyboard();
   return studentReplyKeyboard();
+}
+
+// ---------------------------------------------------------------------
+// TELEGRAM "Menu" TUGMASI — xabar maydonining chap tomonidagi ko'k
+// tugma. setMyCommands orqali ro'yxatdan o'tkaziladi. Foydalanuvchi
+// uni bosganda buyruqlar ro'yxati chiqadi.
+// ---------------------------------------------------------------------
+
+const STUDENT_COMMANDS = [
+  { command: 'start', description: 'Botni ishga tushirish' },
+  { command: 'hujjatlar', description: 'Hujjatlarni yuborish va holatini ko\'rish' },
+  { command: 'status', description: 'Jarayondagi joriy bosqichim' },
+  { command: 'yordam', description: 'Mas\'ul hodimga savol yuborish' },
+  { command: 'qollanma', description: 'Botdan qanday foydalanish' },
+  { command: 'menu', description: 'Tugmalarni qayta ko\'rsatish' },
+];
+
+const ADMIN_COMMANDS = [
+  { command: 'start', description: 'Botni ishga tushirish' },
+  { command: 'qaytar', description: 'Talabaga hujjatni qayta so\'rash' },
+  { command: 'viza', description: 'Talabani viza bosqichiga o\'tkazish' },
+  { command: 'hisobot', description: 'To\'liq analitik hisobot' },
+  { command: 'xulosa', description: 'Kunlik xulosa' },
+  { command: 'qollanma', description: 'Funksiyalar bo\'yicha yo\'riqnoma' },
+  { command: 'menu', description: 'Tugmalarni qayta ko\'rsatish' },
+];
+
+function telegramApi(method, payload) {
+  return new Promise((resolve) => {
+    const data = JSON.stringify(payload);
+    const options = {
+      hostname: 'api.telegram.org',
+      path: `/bot${BOT_TOKEN}/${method}`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+    };
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { resolve(null); } });
+    });
+    req.on('error', () => resolve(null));
+    req.write(data);
+    req.end();
+  });
+}
+
+/** Umumiy (barcha foydalanuvchilar uchun) buyruqlar ro'yxati */
+async function registerDefaultCommands() {
+  const r = await telegramApi('setMyCommands', {
+    commands: STUDENT_COMMANDS,
+    scope: { type: 'default' },
+  });
+  console.log('setMyCommands (default):', r && r.ok ? 'OK' : JSON.stringify(r));
+}
+
+/** Admin/Boss uchun shaxsiy chatda kengaytirilgan ro'yxat */
+async function registerAdminCommands(chatId) {
+  await telegramApi('setMyCommands', {
+    commands: ADMIN_COMMANDS,
+    scope: { type: 'chat', chat_id: chatId },
+  });
+}
+
+// ---------------------------------------------------------------------
+// QO'LLANMA — har bir funksiya nima qilishini tushuntiradi
+// ---------------------------------------------------------------------
+
+const STUDENT_GUIDE = `📖 BOTDAN FOYDALANISH QO'LLANMASI
+
+Bu bot orqali siz ma'lumotlaringizni topshirasiz, hujjatlaringizni yuborasiz va jarayondagi holatingizni kuzatasiz.
+
+━━ TUGMALAR ━━
+
+📄 Hujjatlarim
+Kerakli hujjatlar ro'yxatini ko'rsatadi. Qaysi hujjat yetishmayotganini bilib, o'sha tugmani bosib faylni yuborasiz. Yuborilgan hujjat darhol mutaxassislarimizga yetib boradi.
+
+📊 Mening holatim
+Jarayonning qaysi bosqichida ekaningizni ko'rsatadi: hujjat yig'ish, universitetga topshirish, natija kutish, viza va boshqalar. To'lov holatingiz ham shu yerda ko'rinadi.
+
+🆘 Yordam kerak
+Savolingiz bo'lsa yoki biror joyda qiynalsangiz, shu tugmani bosib savolingizni yozing. Savolingiz mas'ul hodimimizga yetkaziladi va u siz bilan bog'lanadi.
+
+🔄 Qaytadan boshlash
+Shartnoma raqamini qayta kiritish uchun. Masalan boshqa qurilmadan kirsangiz kerak bo'ladi.
+
+━━ MUHIM ━━
+
+• Ism-familyangizni ZAGRAN pasportdagidek kiriting — bu ma'lumot viza uchun ishlatiladi, xato bo'lsa muammo chiqadi.
+• Hujjatlarni istalgan tartibda yuborishingiz mumkin.
+• Bot sizga kuniga 2 marta (10:00 va 16:00) yetishmayotgan hujjatlar haqida eslatib turadi.
+• Ma'lumot kiritishni yarim yo'lda to'xtatsangiz, keyingi safar to'xtagan joyingizdan davom etasiz.`;
+
+const ADMIN_GUIDE = `📖 ADMIN QO'LLANMASI
+
+━━ TUGMALAR ━━
+
+♻️ Hujjatni qaytarish
+Talaba yuborgan hujjat noto'g'ri yoki sifatsiz bo'lsa ishlatiladi. Shartnoma raqamini kiritasiz, keyin qaysi hujjat(lar) qayta so'ralishini belgilaysiz. Talabaga darhol xabar boradi va eslatma tsikli qayta ishga tushadi.
+
+📥 Talaba hujjatlari
+Muayyan talabaning barcha yuborgan hujjatlarini qayta olish uchun. Shartnoma raqamini kiritsangiz, bot barcha fayllarni sizga yuboradi.
+
+🛂 Viza bosqichi
+Talaba universitetga qabul qilinib, kontraktni to'lagandan keyin ishlatiladi. Bu tugma bosilgach, botdan talabadan KDB va ota-ona bank statement hujjatlari so'raladi. Bir nechta talabani vergul bilan ajratib kiritish mumkin.
+
+📊 To'liq hisobot
+Barcha talabalar bo'yicha analitika: bosqichlar, sertifikat turlari va ballari, filiallar, universitetlar, to'lov holati.
+
+🌙 Kunlik xulosa
+Harakatsiz talabalar, hujjat yubormaganlar va to'lov qilmaganlar ro'yxati.
+
+━━ MUHIM ━━
+
+• Hujjatlar to'liq bo'lganda avtomatik ravishda sizga yuboriladi.
+• Guruhda /hujjat buyrug'i orqali ham talaba hujjatlarini so'rash mumkin — javob shu topic'ga qaytadi.`;
+
+const BOSS_GUIDE = `📖 RAHBARIYAT QO'LLANMASI
+
+━━ TUGMALAR ━━
+
+📊 To'liq hisobot
+Barcha talabalar bo'yicha to'liq analitika:
+• Bosqichlar bo'yicha taqsimot (18 ta status)
+• Qabul foizi va viza foizi
+• Sertifikat tahlili: bor/yo'q/TAKER, tur bo'yicha (IELTS, TOPIK, TOEFL, SKA) va har bir turdagi ball taqsimoti
+• Filial bo'yicha sotuv reytingi
+• Universitetlar bo'yicha ariza soni
+• To'lov holati taqsimoti
+
+🌙 Kunlik xulosa
+Har kuni 18:00 da avtomatik keladi. Ichida:
+• Bugun nechta talaba hujjat yuborgani
+• 3+ kundan beri harakatsiz talabalar ro'yxati
+• Umuman hujjat yubormaganlar
+• To'lov qilmaganlar
+
+📥 Talaba hujjatlari
+Muayyan talabaning barcha hujjatlarini ko'rish uchun.
+
+━━ AVTOMATIK ISHLAR ━━
+
+• Talabalarga kuniga 2 marta (10:00, 16:00) hujjat eslatmasi
+• Dushanba 10:00 da to'lov eslatmasi (faqat NOT PAID va DEBT holatidagilarga)
+• Hujjatlar to'liq bo'lganda adminga avtomatik yuborish`;
+
+function guideForUser(chatId) {
+  if (isBoss(chatId)) return BOSS_GUIDE;
+  if (isAdmin(chatId)) return ADMIN_GUIDE;
+  return STUDENT_GUIDE;
 }
 
 
@@ -907,6 +1059,12 @@ app.post('/webhook', async (req, res) => {
     }
 
     // --- Funksiya menyusi (rol asosida farqlanadi) ---
+    // --- /qollanma: funksiyalar bo'yicha yo'riqnoma ---
+    if (text === '/qollanma' || text === '/yoriqnoma') {
+      await sendMessage(chatId, guideForUser(chatId), keyboardForUser(chatId));
+      return res.sendStatus(200);
+    }
+
     if (text === '/menu') {
       // Doimiy tugmalarni (reply keyboard) qayta ko'rsatadi.
       // Foydalanuvchi tugmalarni yashirib qo'ygan bo'lsa, shu bilan
@@ -946,10 +1104,16 @@ app.post('/webhook', async (req, res) => {
 
     // --- /start: shartnoma ID so'raladi ---
     if (text === '/start') {
+      // Admin/Boss uchun kengaytirilgan buyruqlar ro'yxatini
+      // ro'yxatdan o'tkazamiz (ko'k "Menu" tugmasi ostida chiqadi)
+      if (isAdmin(chatId) || isBoss(chatId)) {
+        await registerAdminCommands(chatId);
+      }
       userStates.set(chatId, { mode: 'awaiting_id' });
       await sendMessage(chatId,
         'Assalomu alaykum! Bright Future Consulting botiga xush kelibsiz.\n\n'
-        + 'Boshlash uchun biz bilan qilgan shartnoma raqamingizni kiriting:',
+        + 'Boshlash uchun biz bilan qilgan shartnoma raqamingizni kiriting.\n\n'
+        + 'Botdan qanday foydalanishni bilish uchun 📖 Qo\'llanma tugmasini bosing.',
         keyboardForUser(chatId));
       return res.sendStatus(200);
     }
@@ -961,6 +1125,11 @@ app.post('/webhook', async (req, res) => {
     // =================================================================
     {
       const s = userStates.get(chatId) || {};
+
+      if (text === BTN.GUIDE) {
+        await sendMessage(chatId, guideForUser(chatId), keyboardForUser(chatId));
+        return res.sendStatus(200);
+      }
 
       if (text === BTN.RESTART) {
         userStates.set(chatId, { mode: 'awaiting_id' });
@@ -1995,6 +2164,9 @@ async function runDocumentReminderTick() {
 
 app.listen(PORT, () => {
   console.log(`Student bot ${PORT} portida ishga tushdi`);
+  // Telegram "Menu" tugmasi uchun buyruqlar ro'yxatini ro'yxatdan
+  // o'tkazamiz (bir marta, server ishga tushganda yetarli)
+  registerDefaultCommands().catch((e) => console.error('setMyCommands xatosi:', e));
   setInterval(runDocumentReminderTick, 5 * 60 * 1000);
   setInterval(runPaymentReminderTick, 5 * 60 * 1000);
   setInterval(runDailySummaryTick, 5 * 60 * 1000);
