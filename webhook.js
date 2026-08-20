@@ -160,6 +160,14 @@ async function logDocument(contractId, docCode, fileType, fileId) {
 // hujjatlarini FULL holda qayta yuboradi — hujjatlar to'liq bo'lganda
 // bir marta chaqiriladi.
 const ADMIN_NOTIFY_CHAT_ID = process.env.ADMIN_NOTIFY_CHAT_ID; // /adminid orqali olinadi
+const BOSS_CHAT_ID = process.env.BOSS_CHAT_ID; // hisobot ko'ra oladigan rahbar
+
+function isAdmin(chatId) {
+  return ADMIN_NOTIFY_CHAT_ID && String(chatId) === String(ADMIN_NOTIFY_CHAT_ID);
+}
+function isBoss(chatId) {
+  return BOSS_CHAT_ID && String(chatId) === String(BOSS_CHAT_ID);
+}
 const WELCOME_VIDEO_FILE_ID = process.env.WELCOME_VIDEO_FILE_ID; // /setvideo orqali olinadi
 
 async function sendFullDocumentSetToAdmin(contractId) {
@@ -321,15 +329,139 @@ function buildConfirmSummaryKeyboard() {
 const DB_COL = {
   NUM: 0, PAYMENT: 1, DOCUMENT_STATUS: 2, STATUS: 3, SUPERVISOR: 4,
   ID: 5, FULL_NAME: 6, UNIVERSITY_1: 7, UNIVERSITY_2: 8, AGREEMENT: 9,
-  BRANCH: 13, PHONE: 18, MISSING_DOCS: 41, IZOH: 42,
+  CERT_STATUS: 10, CERTIFICATE: 11, SCORE: 12,
+  BRANCH: 13, PHONE: 18, MISSING_DOCS: 41, IZOH: 42, CHAT_ID: 43,
 };
+
+// ---------------------------------------------------------------------
+// BOSS HISOBOTI — DB sahifasi bo'yicha to'liq analitika
+// ---------------------------------------------------------------------
+
+function countBy(rows, colIndex, transform) {
+  const counts = {};
+  for (const row of rows) {
+    if (!row) continue;
+    let val = String(row[colIndex] || '').trim();
+    if (transform) val = transform(val);
+    if (!val) val = '(bo\'sh)';
+    counts[val] = (counts[val] || 0) + 1;
+  }
+  return counts;
+}
+
+function formatCounts(counts, total, limit) {
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const shown = limit ? entries.slice(0, limit) : entries;
+  return shown.map(([k, v]) => {
+    const pct = total > 0 ? Math.round((v / total) * 100) : 0;
+    return `  ${k}: ${v} ta (${pct}%)`;
+  }).join('\n');
+}
+
+async function buildBossReport() {
+  const rows = (await readSheetRange(`${DB_SHEET}!A2:AR3000`) || [])
+    .filter((r) => r && String(r[DB_COL.ID] || '').trim());
+
+  const total = rows.length;
+  if (total === 0) return ['DB sahifasida ma\'lumot topilmadi.'];
+
+  const messages = [];
+
+  // ---- 1. UMUMIY + STATUS bo'yicha ----
+  const statusCounts = countBy(rows, DB_COL.STATUS, (v) => v.toUpperCase());
+  let m1 = `📊 UMUMIY HISOBOT\n\nJami talabalar: ${total} ta\n\n`;
+  m1 += `━━ BOSQICHLAR (STATUS) ━━\n${formatCounts(statusCounts, total)}`;
+
+  // Muhim yig'ma ko'rsatkichlar
+  const g = (key) => statusCounts[key] || 0;
+  const docReady = g('HUJJAT TAYYOR') + g('HUJJAT TO\'LIQ');
+  const submitted = g('UNIVERSITY 1 TOPSHIRILDI') + g('UNIVERSITY 2 TOPSHIRILDI');
+  const accepted = g('QABUL QILINDI');
+  const rejected = g('QABUL QILINMADI');
+  const visaOk = g('VIZA TASDIQLANDI');
+  const visaNo = g('VIZA RAD QILINDI');
+  const cancelled = g('SHARTNOMA BEKOR QILDI') + g('MUZLATDI');
+
+  m1 += `\n\n━━ ASOSIY KO'RSATKICHLAR ━━\n`;
+  m1 += `  Hujjati tayyor: ${docReady} ta\n`;
+  m1 += `  Universitetga topshirilgan: ${submitted} ta\n`;
+  m1 += `  Qabul qilingan: ${accepted} ta\n`;
+  m1 += `  Qabul qilinmagan: ${rejected} ta\n`;
+  m1 += `  Viza tasdiqlangan: ${visaOk} ta\n`;
+  m1 += `  Viza rad etilgan: ${visaNo} ta\n`;
+  m1 += `  Bekor/muzlatilgan: ${cancelled} ta`;
+
+  if (accepted + rejected > 0) {
+    const rate = Math.round((accepted / (accepted + rejected)) * 100);
+    m1 += `\n\n  Qabul foizi: ${rate}% (${accepted}/${accepted + rejected})`;
+  }
+  if (visaOk + visaNo > 0) {
+    const vrate = Math.round((visaOk / (visaOk + visaNo)) * 100);
+    m1 += `\n  Viza foizi: ${vrate}% (${visaOk}/${visaOk + visaNo})`;
+  }
+  messages.push(m1);
+
+  // ---- 2. SERTIFIKAT tahlili ----
+  const certStatusCounts = countBy(rows, DB_COL.CERT_STATUS, (v) => v.toUpperCase());
+  const certTypeCounts = countBy(
+    rows.filter((r) => String(r[DB_COL.CERTIFICATE] || '').trim()),
+    DB_COL.CERTIFICATE, (v) => v.toUpperCase()
+  );
+
+  let m2 = `🎓 SERTIFIKAT TAHLILI\n\n━━ HOLAT ━━\n${formatCounts(certStatusCounts, total)}`;
+  m2 += `\n\n━━ SERTIFIKAT TURI ━━\n`;
+  const certTotal = Object.values(certTypeCounts).reduce((a, b) => a + b, 0);
+  m2 += formatCounts(certTypeCounts, certTotal) || '  (ma\'lumot yo\'q)';
+
+  // Har bir sertifikat turi uchun ball taqsimoti
+  const byType = {};
+  for (const row of rows) {
+    if (!row) continue;
+    const type = String(row[DB_COL.CERTIFICATE] || '').trim().toUpperCase();
+    const score = String(row[DB_COL.SCORE] || '').trim();
+    if (!type || !score) continue;
+    if (!byType[type]) byType[type] = {};
+    byType[type][score] = (byType[type][score] || 0) + 1;
+  }
+
+  for (const [type, scores] of Object.entries(byType)) {
+    const typeTotal = Object.values(scores).reduce((a, b) => a + b, 0);
+    m2 += `\n\n━━ ${type} BALLARI ━━\n${formatCounts(scores, typeTotal)}`;
+  }
+  messages.push(m2);
+
+  // ---- 3. FILIAL va UNIVERSITETLAR ----
+  const branchCounts = countBy(rows, DB_COL.BRANCH, (v) => v.toUpperCase());
+  let m3 = `🏢 FILIAL BO'YICHA SOTUV\n\n${formatCounts(branchCounts, total)}`;
+
+  const uniCounts = {};
+  for (const row of rows) {
+    if (!row) continue;
+    for (const col of [DB_COL.UNIVERSITY_1, DB_COL.UNIVERSITY_2]) {
+      const uni = String(row[col] || '').trim();
+      if (!uni) continue;
+      uniCounts[uni] = (uniCounts[uni] || 0) + 1;
+    }
+  }
+  const uniTotal = Object.values(uniCounts).reduce((a, b) => a + b, 0);
+  m3 += `\n\n🏛 UNIVERSITETLAR (jami ${uniTotal} ta ariza)\n`;
+  m3 += formatCounts(uniCounts, uniTotal, 15) || '  (ma\'lumot yo\'q)';
+
+  // To'lov holati
+  const payCounts = countBy(rows, DB_COL.PAYMENT, (v) => v.toUpperCase());
+  m3 += `\n\n💰 TO'LOV HOLATI\n${formatCounts(payCounts, total)}`;
+  messages.push(m3);
+
+  return messages;
+}
+
 
 /**
  * DB sahifasidan shartnoma ID bo'yicha qatorni topadi.
  * @returns {Array|null} qator massivi yoki null
  */
 async function findDbRowByContractId(contractId) {
-  const rows = await readSheetRange(`${DB_SHEET}!A2:AQ3000`);
+  const rows = await readSheetRange(`${DB_SHEET}!A2:AR3000`);
   if (!rows) return null;
   const normalized = String(contractId).trim().toUpperCase();
   for (const row of rows) {
@@ -339,7 +471,13 @@ async function findDbRowByContractId(contractId) {
   return null;
 }
 
+/**
+ * Talabaning raqamli chat_id'sini topadi. Avval DB!AR ustunidan
+ * qidiriladi (asosiy manba), topilmasa DRAFT!AQ dan olinadi.
+ */
 async function findStudentChatId(contractId) {
+  const dbRow = await findDbRowByContractId(contractId);
+  if (dbRow && dbRow[DB_COL.CHAT_ID]) return String(dbRow[DB_COL.CHAT_ID]).trim();
   const rowNum = await findRowByContractId(contractId);
   if (!rowNum) return null;
   const rowData = await getRowData(rowNum);
@@ -462,6 +600,7 @@ function buildAdminMenuKeyboard() {
       [{ text: '♻️ Hujjatni qaytarish', callback_data: 'menu:qaytar' }],
       [{ text: '📄 Talaba hujjatlarini olish', callback_data: 'menu:gethujjat' }],
       [{ text: '🛂 Viza bosqichiga o\'tkazish (KDB)', callback_data: 'menu:viza' }],
+      [{ text: '📊 To\'liq hisobot', callback_data: 'menu:hisobot' }],
     ],
   };
 }
@@ -636,7 +775,7 @@ app.post('/webhook', async (req, res) => {
     // ota-ona bank statement hujjatlari talab qilinadi. Faqat shu
     // buyruqdan keyin ular ro'yxatga qo'shiladi va eslatma boshlanadi.
     if (text === '/viza') {
-      if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+      if (!isAdmin(chatId) && !isBoss(chatId)) {
         await sendMessage(chatId, 'Bu buyruq faqat administrator uchun.');
         return res.sendStatus(200);
       }
@@ -649,12 +788,54 @@ app.post('/webhook', async (req, res) => {
     // Murodil shu buyruq orqali qaysi hujjat(lar) qayta so'ralishini
     // belgilaydi. Faqat ADMIN_NOTIFY_CHAT_ID'dan ishlaydi.
     if (text === '/qaytar') {
-      if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+      if (!isAdmin(chatId) && !isBoss(chatId)) {
         await sendMessage(chatId, 'Bu buyruq faqat administrator uchun.');
         return res.sendStatus(200);
       }
       userStates.set(chatId, { mode: 'admin_return_awaiting_id' });
       await sendMessage(chatId, 'Qaysi talabaning hujjatlarini qaytarish kerak? Shartnoma raqamini kiriting:');
+      return res.sendStatus(200);
+    }
+
+    // --- /xulosa: kunlik xulosani darhol ko'rish (sinov uchun ham) ---
+    if (text === '/xulosa') {
+      if (!isBoss(chatId) && !isAdmin(chatId)) {
+        await sendMessage(chatId, 'Bu buyruq faqat rahbariyat uchun.');
+        return res.sendStatus(200);
+      }
+      await sendMessage(chatId, 'Xulosa tayyorlanmoqda...');
+      try {
+        const summary = await buildDailySummary();
+        if (summary.length <= 4000) {
+          await sendMessage(chatId, summary);
+        } else {
+          for (let i = 0; i < summary.length; i += 4000) {
+            await sendMessage(chatId, summary.slice(i, i + 4000));
+          }
+        }
+      } catch (e) {
+        console.error('Xulosa xatosi:', e);
+        await sendMessage(chatId, 'Xulosa tayyorlashda xatolik: ' + e.message);
+      }
+      return res.sendStatus(200);
+    }
+
+    // --- /hisobot: Boss uchun to'liq analitika (DB sahifasidan) ---
+    if (text === '/hisobot') {
+      if (!isBoss(chatId) && !isAdmin(chatId)) {
+        await sendMessage(chatId, 'Bu buyruq faqat rahbariyat uchun.');
+        return res.sendStatus(200);
+      }
+      await sendMessage(chatId, 'Hisobot tayyorlanmoqda, biroz kuting...');
+      try {
+        const parts = await buildBossReport();
+        for (const part of parts) {
+          await sendMessage(chatId, part);
+        }
+      } catch (e) {
+        console.error('Hisobot xatosi:', e);
+        await sendMessage(chatId, 'Hisobot tayyorlashda xatolik yuz berdi: ' + e.message);
+      }
       return res.sendStatus(200);
     }
 
@@ -668,7 +849,15 @@ app.post('/webhook', async (req, res) => {
 
     // --- Funksiya menyusi (rol asosida farqlanadi) ---
     if (text === '/menu') {
-      if (ADMIN_NOTIFY_CHAT_ID && String(chatId) === String(ADMIN_NOTIFY_CHAT_ID)) {
+      if (isBoss(chatId)) {
+        await sendMessage(chatId, 'Rahbariyat funksiyalari:', {
+          inline_keyboard: [
+            [{ text: '📊 To\'liq hisobot', callback_data: 'menu:hisobot' }],
+            [{ text: '🌙 Kunlik xulosa', callback_data: 'menu:xulosa' }],
+            [{ text: '📄 Talaba hujjatlarini olish', callback_data: 'menu:gethujjat' }],
+          ],
+        });
+      } else if (isAdmin(chatId)) {
         await sendMessage(chatId, 'Admin funksiyalari:', buildAdminMenuKeyboard());
       } else {
         await sendMessage(chatId, 'Funksiyalar:', buildStudentMenuKeyboard());
@@ -1084,8 +1273,41 @@ async function handleCallback(callback) {
     await sendStudentStatus(chatId, s.contractId, s.row);
     return;
   }
+  if (data === 'menu:xulosa') {
+    if (!isBoss(chatId) && !isAdmin(chatId)) {
+      answerCallbackQuery(callbackId, 'Ruxsat yo\'q.');
+      return;
+    }
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, 'Xulosa tayyorlanmoqda...');
+    try {
+      const summary = await buildDailySummary();
+      if (summary.length <= 4000) await sendMessage(chatId, summary);
+      else for (let i = 0; i < summary.length; i += 4000) await sendMessage(chatId, summary.slice(i, i + 4000));
+    } catch (e) {
+      console.error('Xulosa xatosi:', e);
+      await sendMessage(chatId, 'Xatolik: ' + e.message);
+    }
+    return;
+  }
+  if (data === 'menu:hisobot') {
+    if (!isBoss(chatId) && !isAdmin(chatId)) {
+      answerCallbackQuery(callbackId, 'Ruxsat yo\'q.');
+      return;
+    }
+    answerCallbackQuery(callbackId, '');
+    await sendMessage(chatId, 'Hisobot tayyorlanmoqda, biroz kuting...');
+    try {
+      const parts = await buildBossReport();
+      for (const part of parts) await sendMessage(chatId, part);
+    } catch (e) {
+      console.error('Hisobot xatosi:', e);
+      await sendMessage(chatId, 'Hisobot tayyorlashda xatolik: ' + e.message);
+    }
+    return;
+  }
   if (data === 'menu:viza') {
-    if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+    if (!isAdmin(chatId) && !isBoss(chatId)) {
       answerCallbackQuery(callbackId, 'Ruxsat yo\'q.');
       return;
     }
@@ -1095,7 +1317,7 @@ async function handleCallback(callback) {
     return;
   }
   if (data === 'menu:gethujjat') {
-    if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+    if (!isAdmin(chatId) && !isBoss(chatId)) {
       answerCallbackQuery(callbackId, 'Ruxsat yo\'q.');
       return;
     }
@@ -1105,7 +1327,7 @@ async function handleCallback(callback) {
     return;
   }
   if (data === 'menu:qaytar') {
-    if (!ADMIN_NOTIFY_CHAT_ID || String(chatId) !== String(ADMIN_NOTIFY_CHAT_ID)) {
+    if (!isAdmin(chatId) && !isBoss(chatId)) {
       answerCallbackQuery(callbackId, 'Ruxsat yo\'q.');
       return;
     }
@@ -1360,6 +1582,214 @@ function getTashkentHourAndDateKey() {
 
 let reminderTickRunning = false;
 
+// =====================================================================
+// TO'LOV ESLATMASI — haftada BIR marta (dushanba 10:00, Toshkent).
+// Manba: DB sahifasi (DRAFT emas).
+//   PAYMENT = 'NOT PAID' -> boshlang'ich to'lov qilinmagan
+//   PAYMENT = 'DEBT'     -> qisman to'lagan, qarzdorlik bor
+//   PAYMENT = 'FULL' / 'OLD STUDENT' / 'REFUND' -> eslatma YO'Q
+// Shovqin bo'lmasligi uchun: haftada 1 marta, yumshoq ohangda,
+// ayblovsiz. To'lov holati o'zgarishi bilan avtomatik to'xtaydi.
+// =====================================================================
+
+const PAYMENT_MESSAGES = {
+  'NOT PAID': 'Assalomu alaykum! Sizning shartnomangiz bo\'yicha boshlang\'ich to\'lov hali qayd etilmagan.\n\n'
+    + 'Jarayonni boshlashimiz uchun to\'lovni amalga oshirishingiz kerak. '
+    + 'Savollaringiz bo\'lsa yoki to\'lovni allaqachon qilgan bo\'lsangiz, filialingizga murojaat qiling.',
+  'DEBT': 'Assalomu alaykum! Sizning shartnomangiz bo\'yicha qarzdorlik mavjud.\n\n'
+    + 'Jarayonni kechiktirmaslik uchun qolgan summani to\'lashingizni so\'raymiz. '
+    + 'Savollaringiz bo\'lsa, filialingizga murojaat qiling.',
+};
+
+let paymentTickRunning = false;
+
+async function runPaymentReminderTick() {
+  if (paymentTickRunning) return;
+  paymentTickRunning = true;
+  try {
+    const now = new Date();
+    const tashkent = new Date(now.getTime() + 5 * 3600000);
+    const dayOfWeek = tashkent.getUTCDay(); // 1 = dushanba
+    const hour = tashkent.getUTCHours();
+    const minute = tashkent.getUTCMinutes();
+    const dateKey = tashkent.toISOString().slice(0, 10);
+
+    // Faqat dushanba 10:00-10:05 oralig'ida
+    if (dayOfWeek !== 1 || hour !== 10 || minute >= 5) return;
+    if (lastPaymentReminderDate === dateKey) return; // bugun allaqachon yuborilgan
+    lastPaymentReminderDate = dateKey;
+
+    const rows = await readSheetRange(`${DB_SHEET}!A2:AR3000`);
+    if (!rows) return;
+
+    let sent = 0;
+    for (const row of rows) {
+      if (!row) continue;
+      const contractId = String(row[DB_COL.ID] || '').trim();
+      const payment = String(row[DB_COL.PAYMENT] || '').trim().toUpperCase();
+      const chatId = String(row[DB_COL.CHAT_ID] || '').trim();
+
+      if (!contractId || !chatId) continue;
+      const msg = PAYMENT_MESSAGES[payment];
+      if (!msg) continue; // FULL / OLD STUDENT / REFUND / bo'sh — eslatma yo'q
+
+      await sendMessage(chatId, msg);
+      sent++;
+    }
+    console.log(`To'lov eslatmasi yuborildi: ${sent} ta talabaga (${dateKey})`);
+  } catch (err) {
+    console.error('To\'lov eslatmasi xatosi:', err);
+  } finally {
+    paymentTickRunning = false;
+  }
+}
+
+// =====================================================================
+// KUNLIK XULOSA — har kuni 18:00 (Toshkent) BOSS_CHAT_ID ga yuboriladi.
+// "Harakatsiz talaba" DOCUMENT_LOG timestamp'lari orqali aniqlanadi
+// (DB'da oxirgi harakat ustuni yo'q — shuning uchun shu yo'l).
+// =====================================================================
+
+const STALLED_DAYS = 3; // necha kundan beri harakatsiz bo'lsa signal
+
+let lastDailySummaryDate = null;
+let dailyTickRunning = false;
+
+/**
+ * DOCUMENT_LOG'dan har bir shartnoma uchun OXIRGI hujjat sanasini
+ * qaytaradi: { '2609-M0001': Date, ... }
+ */
+async function getLastActivityMap() {
+  const rows = await readSheetRange(`${DOCUMENTS_LOG_SHEET}!A2:E5000`) || [];
+  const map = {};
+  for (const r of rows) {
+    if (!r || !r[1] || !r[0]) continue;
+    const id = String(r[1]).trim().toUpperCase();
+    const t = new Date(r[0]);
+    if (isNaN(t.getTime())) continue;
+    if (!map[id] || t > map[id]) map[id] = t;
+  }
+  return map;
+}
+
+async function buildDailySummary() {
+  const rows = (await readSheetRange(`${DB_SHEET}!A2:AR3000`) || [])
+    .filter((r) => r && String(r[DB_COL.ID] || '').trim());
+  const activity = await getLastActivityMap();
+  const now = new Date();
+  const todayKey = new Date(now.getTime() + 5 * 3600000).toISOString().slice(0, 10);
+
+  // Bugun hujjat yuborganlar
+  const activeToday = new Set();
+  for (const [id, t] of Object.entries(activity)) {
+    const dayKey = new Date(t.getTime() + 5 * 3600000).toISOString().slice(0, 10);
+    if (dayKey === todayKey) activeToday.add(id);
+  }
+
+  // Faol bosqichdagi talabalar (jarayoni davom etayotganlar)
+  const ACTIVE_STATUSES = [
+    "TO'LOV QILDI", "HUJJAT YIG'ILMOQDA", "HUJJAT TO'LIQ", 'HUJJAT TAYYOR',
+    "KONTRAKT TO'LADI", "KDB QO'YDI", 'COA OLDI',
+  ];
+
+  const stalled = [];   // uzoq vaqt harakatsiz
+  const noActivity = []; // umuman hujjat yubormagan
+  const notPaid = [];
+
+  for (const row of rows) {
+    const id = String(row[DB_COL.ID] || '').trim().toUpperCase();
+    const status = String(row[DB_COL.STATUS] || '').trim().toUpperCase();
+    const payment = String(row[DB_COL.PAYMENT] || '').trim().toUpperCase();
+    const name = row[DB_COL.FULL_NAME] || '';
+    const branch = row[DB_COL.BRANCH] || '';
+
+    if (payment === 'NOT PAID') notPaid.push(`${id} — ${name} (${branch})`);
+
+    if (!ACTIVE_STATUSES.includes(status)) continue;
+
+    const last = activity[id];
+    if (!last) {
+      noActivity.push(`${id} — ${name} (${branch})`);
+    } else {
+      const days = Math.floor((now - last) / 86400000);
+      if (days >= STALLED_DAYS) {
+        stalled.push(`${id} — ${name} (${branch}) — ${days} kun`);
+      }
+    }
+  }
+
+  const statusCounts = countBy(rows, DB_COL.STATUS, (v) => v.toUpperCase());
+  const g = (k) => statusCounts[k] || 0;
+
+  let text = `🌙 KUNLIK XULOSA — ${todayKey}\n\n`;
+  text += `Jami talabalar: ${rows.length} ta\n`;
+  text += `Bugun hujjat yuborganlar: ${activeToday.size} ta\n\n`;
+
+  text += `━━ FAOL BOSQICHLAR ━━\n`;
+  text += `  Hujjat yig'ilmoqda: ${g("HUJJAT YIG'ILMOQDA")} ta\n`;
+  text += `  Hujjat to'liq: ${g("HUJJAT TO'LIQ")} ta\n`;
+  text += `  Hujjat tayyor: ${g('HUJJAT TAYYOR')} ta\n`;
+  text += `  Universitetda: ${g('UNIVERSITY 1 TOPSHIRILDI') + g('UNIVERSITY 2 TOPSHIRILDI')} ta\n`;
+  text += `  Elchixonada: ${g('ELCHIXONA')} ta\n`;
+
+  if (stalled.length > 0) {
+    text += `\n⚠️ ${STALLED_DAYS}+ KUN HARAKATSIZ (${stalled.length} ta)\n`;
+    text += stalled.slice(0, 20).map((s) => `  • ${s}`).join('\n');
+    if (stalled.length > 20) text += `\n  ...va yana ${stalled.length - 20} ta`;
+  }
+
+  if (noActivity.length > 0) {
+    text += `\n\n🔴 UMUMAN HUJJAT YUBORMAGAN (${noActivity.length} ta)\n`;
+    text += noActivity.slice(0, 20).map((s) => `  • ${s}`).join('\n');
+    if (noActivity.length > 20) text += `\n  ...va yana ${noActivity.length - 20} ta`;
+  }
+
+  if (notPaid.length > 0) {
+    text += `\n\n💰 TO'LOV QILMAGANLAR (${notPaid.length} ta)\n`;
+    text += notPaid.slice(0, 15).map((s) => `  • ${s}`).join('\n');
+    if (notPaid.length > 15) text += `\n  ...va yana ${notPaid.length - 15} ta`;
+  }
+
+  if (stalled.length === 0 && noActivity.length === 0) {
+    text += `\n\n✅ Harakatsiz talaba yo'q — barchasi jarayonda.`;
+  }
+
+  return text;
+}
+
+async function runDailySummaryTick() {
+  if (dailyTickRunning) return;
+  dailyTickRunning = true;
+  try {
+    if (!BOSS_CHAT_ID) return;
+    const t = new Date(Date.now() + 5 * 3600000);
+    const hour = t.getUTCHours();
+    const minute = t.getUTCMinutes();
+    const dateKey = t.toISOString().slice(0, 10);
+
+    if (hour !== 18 || minute >= 5) return;
+    if (lastDailySummaryDate === dateKey) return;
+    lastDailySummaryDate = dateKey;
+
+    const text = await buildDailySummary();
+    // Telegram xabar chegarasi ~4096 belgi — kerak bo'lsa bo'linadi
+    if (text.length <= 4000) {
+      await sendMessage(BOSS_CHAT_ID, text);
+    } else {
+      for (let i = 0; i < text.length; i += 4000) {
+        await sendMessage(BOSS_CHAT_ID, text.slice(i, i + 4000));
+      }
+    }
+    console.log(`Kunlik xulosa yuborildi: ${dateKey}`);
+  } catch (err) {
+    console.error('Kunlik xulosa xatosi:', err);
+  } finally {
+    dailyTickRunning = false;
+  }
+}
+
+let lastPaymentReminderDate = null;
+
 async function runDocumentReminderTick() {
   if (reminderTickRunning) return;
   reminderTickRunning = true;
@@ -1409,4 +1839,6 @@ async function runDocumentReminderTick() {
 app.listen(PORT, () => {
   console.log(`Student bot ${PORT} portida ishga tushdi`);
   setInterval(runDocumentReminderTick, 5 * 60 * 1000);
+  setInterval(runPaymentReminderTick, 5 * 60 * 1000);
+  setInterval(runDailySummaryTick, 5 * 60 * 1000);
 });
