@@ -40,7 +40,9 @@ const DOCUMENTS_LOG_SHEET = 'DOCUMENT_LOG';
 const FAQ_SHEET = 'FAQ';            // A:№ B:SAVOL C:JAVOB D:KIM KIRITDI
 const BRANCHES_SHEET = 'LOCATION';  // A:BRANCH NAME B:ADRESS C:LATITUDE D:LONGITUDE
 const CONTACTS_SHEET = 'CONTACTS';  // A:NAME B:POSITION C:PHONE
-const COMPLAINTS_SHEET = 'COMPLAINTS'; // A:№ B:DATE C:ID D:NAME E:USERNAME F:MATN // A:timestamp B:contractId C:docCode D:fileType E:fileId
+const COMPLAINTS_SHEET = 'COMPLAINTS'; // A:№ B:DATE C:ID D:NAME E:USERNAME F:MATN
+const DOC_SAMPLES_SHEET = 'DOC_SAMPLES'; // A:KOD B:TALAB/TAVSIF C:NAMUNA_FILE_ID D:TUR
+const DOC_GUIDE_SHEET = 'DOC_GUIDE';   // A:№ B:DOC_CODE C:TALAB D:NAMUNA_FILE_ID E:NAMUNA_TURI // A:timestamp B:contractId C:docCode D:fileType E:fileId
 
 const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
 const auth = new google.auth.GoogleAuth({
@@ -921,6 +923,62 @@ function buildContactsKeyboard(contacts) {
   };
 }
 
+// =====================================================================
+// HUJJAT NAMUNALARI VA TALABLARI
+// Manba: DOC_SAMPLES sahifasi (A:KOD B:TAVSIF C:NAMUNA_FILE_ID D:TUR)
+// Supervisorlar /namuna buyrug'i orqali yoki to'g'ridan-to'g'ri
+// Sheet'da yangilay oladi.
+// =====================================================================
+
+async function getDocSamples() {
+  const rows = await readSheetRange(`${DOC_SAMPLES_SHEET}!A2:D100`) || [];
+  const map = {};
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !String(r[0] || '').trim()) continue;
+    map[String(r[0]).trim().toUpperCase()] = {
+      row: i + 2,
+      description: String(r[1] || '').trim(),
+      fileId: String(r[2] || '').trim(),
+      fileType: String(r[3] || 'photo').trim().toLowerCase(),
+    };
+  }
+  return map;
+}
+
+/**
+ * Hujjat so'rashdan OLDIN talabga qo'yiladigan talablar va namunani
+ * yuboradi. Sheet'da ma'lumot bo'lmasa, umumiy talablar ko'rsatiladi.
+ */
+async function sendDocRequirements(chatId, docCode) {
+  const doc = DOCUMENT_TYPES.find((d) => d.code === docCode);
+  const label = doc ? doc.label : docCode;
+
+  let samples = {};
+  try { samples = await getDocSamples(); } catch (e) { console.error('DOC_SAMPLES o\'qishda xato:', e); }
+  const s = samples[String(docCode).toUpperCase()];
+
+  let text = `📎 ${label}\n\n`;
+  if (s && s.description) {
+    text += s.description;
+  } else {
+    text += 'Umumiy talablar:\n'
+      + '• Hujjat to\'liq ko\'rinishda, chetlari kesilmagan bo\'lsin\n'
+      + '• Matn aniq o\'qiladigan, xira emas\n'
+      + '• Yorug\'lik yetarli, soya va yorqin dog\' bo\'lmasin\n'
+      + '• Rangli holda (qora-oq emas)';
+  }
+  text += '\n\nShu talablarga mos faylni yuboring:';
+
+  // Avval namuna rasmi (agar bo'lsa), keyin matn
+  if (s && s.fileId) {
+    const method = s.fileType === 'document' ? 'sendDocument' : 'sendPhoto';
+    const field = s.fileType === 'document' ? 'document' : 'photo';
+    await telegramApi(method, { chat_id: chatId, [field]: s.fileId, caption: `NAMUNA: ${label}` });
+  }
+  await sendMessage(chatId, text);
+}
+
 
 
 function buildStudentMenuKeyboard() {  return {
@@ -1192,6 +1250,17 @@ app.post('/webhook', async (req, res) => {
     else if (text === '/filiallar') text = BTN.BRANCHES;
     else if (text === '/aloqa') text = BTN.CONTACTS;
     else if (text === '/savollar' || text === '/faq') text = BTN.FAQ;
+
+    // --- /namuna: hujjat namunasi va talablarini sozlash (supervisor) ---
+    if (text === '/namuna') {
+      if (!canEditFaq(chatId)) {
+        await sendMessage(chatId, 'Bu funksiya faqat supervisorlar uchun.');
+        return res.sendStatus(200);
+      }
+      const rows = DOCUMENT_TYPES.map((d) => [{ text: d.label, callback_data: `smpl:${d.code}` }]);
+      await sendMessage(chatId, 'Qaysi hujjat uchun namuna/talab sozlaysiz?', { inline_keyboard: rows });
+      return res.sendStatus(200);
+    }
 
     // --- /qollanma: funksiyalar bo'yicha yo'riqnoma ---
     if (text === '/qollanma' || text === '/yoriqnoma') {
@@ -1540,6 +1609,50 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // --- Namuna sozlash: talab matni kutilmoqda ---
+    if (session && session.mode === 'sample_awaiting_desc') {
+      session.sampleDesc = text;
+      session.mode = 'sample_awaiting_photo';
+      userStates.set(chatId, session);
+      await sendMessage(chatId,
+        'Talablar saqlandi.\n\nEndi NAMUNA rasmini yuboring (talaba shu rasmni ko\'radi), '
+        + 'yoki rasmsiz saqlash uchun tugmani bosing.',
+        { inline_keyboard: [[{ text: 'Rasmsiz saqlash ➡️', callback_data: 'smplsave:nofile' }]] });
+      return res.sendStatus(200);
+    }
+
+    // --- Namuna sozlash: rasm kutilmoqda ---
+    if (session && session.mode === 'sample_awaiting_photo' && (message.photo || message.document)) {
+      let fid, ftype;
+      if (message.document) { fid = message.document.file_id; ftype = 'document'; }
+      else { fid = message.photo[message.photo.length - 1].file_id; ftype = 'photo'; }
+      await saveDocSample(chatId, session, fid, ftype);
+      return res.sendStatus(200);
+    }
+
+    // --- ADMIN: hujjat qaytarish sababi kutilmoqda ---
+    if (session && session.mode === 'admin_return_awaiting_reason') {
+      session.returnReason = text;
+      session.mode = 'admin_return_awaiting_sample';
+      userStates.set(chatId, session);
+      await sendMessage(chatId,
+        'Sabab qabul qilindi.\n\nEndi NAMUNA rasm yuborishingiz mumkin '
+        + '(talabaga to\'g\'ri ko\'rinishni ko\'rsatish uchun), yoki namunasiz '
+        + 'yuborish uchun "Namunasiz yuborish" tugmasini bosing.',
+        { inline_keyboard: [[{ text: 'Namunasiz yuborish ➡️', callback_data: 'adret:nosample' }]] });
+      return res.sendStatus(200);
+    }
+
+    // --- ADMIN: qaytarish uchun namuna rasm kutilmoqda ---
+    if (session && session.mode === 'admin_return_awaiting_sample'
+        && (message.photo || message.document)) {
+      let fid, ftype;
+      if (message.document) { fid = message.document.file_id; ftype = 'document'; }
+      else { fid = message.photo[message.photo.length - 1].file_id; ftype = 'photo'; }
+      await finalizeDocReturn(chatId, session, fid, ftype);
+      return res.sendStatus(200);
+    }
+
     // --- Admin oqimi: viza bosqichi uchun shartnoma ID(lar) kutilmoqda ---
     if (session && session.mode === 'admin_visa_awaiting_id') {
       userStates.delete(chatId);
@@ -1782,6 +1895,96 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+/**
+ * DOC_SAMPLES sahifasiga hujjat talablari va namunasini saqlaydi.
+ * Mavjud yozuv bo'lsa yangilanadi, bo'lmasa yangi qator qo'shiladi.
+ */
+async function saveDocSample(chatId, session, fileId, fileType) {
+  try {
+    const code = String(session.sampleCode).toUpperCase();
+    const samples = await getDocSamples();
+    const existing = samples[code];
+
+    if (existing) {
+      await updateCell(`${DOC_SAMPLES_SHEET}!B${existing.row}`, session.sampleDesc);
+      if (fileId) {
+        await updateCell(`${DOC_SAMPLES_SHEET}!C${existing.row}`, fileId);
+        await updateCell(`${DOC_SAMPLES_SHEET}!D${existing.row}`, fileType);
+      }
+    } else {
+      await appendRow(`${DOC_SAMPLES_SHEET}!A:D`, [
+        code, session.sampleDesc, fileId || '', fileType || '',
+      ]);
+    }
+
+    const doc = DOCUMENT_TYPES.find((d) => d.code === session.sampleCode);
+    await sendMessage(chatId,
+      `"${doc ? doc.label : code}" uchun talablar${fileId ? ' va namuna' : ''} saqlandi ✅\n\n`
+      + 'Endi talabalar shu hujjatni yuborishdan oldin buni ko\'radi.',
+      keyboardForUser(chatId));
+  } catch (e) {
+    console.error('saveDocSample xatosi:', e);
+    await sendMessage(chatId, 'Saqlashda xatolik: ' + e.message);
+  }
+  const s = userStates.get(chatId) || {};
+  userStates.set(chatId, { ...s, mode: null, sampleCode: null, sampleDesc: null });
+}
+
+/**
+ * Hujjat qaytarish jarayonini yakunlaydi: ro'yxatni yangilaydi va
+ * talabaga SABAB + (ixtiyoriy) NAMUNA bilan birga xabar yuboradi.
+ */
+async function finalizeDocReturn(adminChatId, session, sampleFileId, sampleFileType) {
+  try {
+    const rowData = await getRowData(session.row);
+    const currentMissing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+    const newMissing = Array.from(new Set([...currentMissing, ...session.selectedCodes]));
+    await updateCell(`${DRAFT_SHEET}!AN${session.row}`, newMissing.join(', '));
+    await updateCell(`${DRAFT_SHEET}!B${session.row}`, 'MA\'LUMOT TASDIQLANDI');
+
+    const studentChatId = rowData[TELEGRAM_CHAT_ID_COLUMN];
+    if (studentChatId) {
+      const labels = session.selectedCodes.map((code) => {
+        const doc = DOCUMENT_TYPES.find((d) => d.code === code);
+        return `\u2022 ${doc ? doc.label : code}`;
+      }).join('\n');
+
+      let msg = `⚠️ HUJJAT QAYTA SO'RALMOQDA\n\n`
+        + `Quyidagi hujjat(lar) qabul qilinmadi:\n${labels}\n\n`
+        + `SABABI:\n${session.returnReason}\n\n`;
+
+      if (sampleFileId) {
+        msg += 'Pastda to\'g\'ri namunani ko\'rasiz. Shu ko\'rinishda qayta yuboring.';
+      } else {
+        msg += 'Iltimos, yuqoridagi ko\'rsatmaga amal qilib qayta yuboring.';
+      }
+
+      await sendMessage(studentChatId, msg);
+
+      if (sampleFileId) {
+        const method = sampleFileType === 'document' ? 'sendDocument' : 'sendPhoto';
+        const field = sampleFileType === 'document' ? 'document' : 'photo';
+        await telegramApi(method, {
+          chat_id: studentChatId, [field]: sampleFileId,
+          caption: 'NAMUNA — shu ko\'rinishda yuboring',
+        });
+      }
+
+      await sendMessage(studentChatId, 'Hujjatni qayta yuborish uchun tugmani bosing:',
+        buildDocumentMenuKeyboard(newMissing));
+    }
+
+    await sendMessage(adminChatId,
+      `Shartnoma ${session.contractId} uchun ${session.selectedCodes.length} ta hujjat qaytarildi.\n`
+      + `Talabaga sabab${sampleFileId ? ' va namuna' : ''} bilan xabar berildi.`,
+      keyboardForUser(adminChatId));
+  } catch (e) {
+    console.error('finalizeDocReturn xatosi:', e);
+    await sendMessage(adminChatId, 'Xatolik: ' + e.message);
+  }
+  userStates.delete(adminChatId);
+}
+
 // =====================================================================
 // GURUH OQIMI — hodim "/hujjat" buyrug'i orqali talaba hujjatlarini
 // qayta so'raydi. Reply-based: bot o'z xabariga REPLY qilingan javobni
@@ -1893,6 +2096,35 @@ async function handleCallback(callback) {
     if (c.role) t += `\n${c.role}`;
     t += `\n\n☎️ ${c.phone || 'raqam kiritilmagan'}`;
     await sendMessage(chatId, t);
+    return;
+  }
+
+  // --- Namuna: rasmsiz saqlash ---
+  if (data === 'smplsave:nofile') {
+    const s = userStates.get(chatId);
+    if (!s || s.mode !== 'sample_awaiting_photo') {
+      answerCallbackQuery(callbackId, 'Sessiya topilmadi.');
+      return;
+    }
+    answerCallbackQuery(callbackId, '');
+    await saveDocSample(chatId, s, null, null);
+    return;
+  }
+
+  // --- Namuna sozlash: hujjat tanlandi ---
+  if (data.startsWith('smpl:')) {
+    if (!canEditFaq(chatId)) { answerCallbackQuery(callbackId, 'Ruxsat yo\'q.'); return; }
+    const code = data.substring(5);
+    const s = userStates.get(chatId) || {};
+    userStates.set(chatId, { ...s, mode: 'sample_awaiting_desc', sampleCode: code });
+    answerCallbackQuery(callbackId, '');
+    const doc = DOCUMENT_TYPES.find((d) => d.code === code);
+    await sendMessage(chatId,
+      `"${doc ? doc.label : code}" uchun TALABLARNI yozing.\n\n`
+      + 'Talaba hujjat yuborishdan oldin shu matnni ko\'radi. '
+      + 'Aniq va sodda yozing.\n\n'
+      + 'Misol:\n"Passportning ma\'lumot sahifasini to\'liq suratga oling. '
+      + 'Barcha 4 ta cheti ko\'rinsin, raqamlar aniq o\'qilsin, yorug\'lik yetarli bo\'lsin."');
     return;
   }
 
@@ -2011,11 +2243,23 @@ async function handleCallback(callback) {
   // --- ADMIN: hujjat tanlash (qaytarish uchun) ---
   if (data.startsWith('adret:')) {
     const s = userStates.get(chatId);
+    const action = data.substring(6);
+
+    // 'nosample' — namuna bosqichida keladi, boshqa rejimda
+    if (action === 'nosample') {
+      if (!s || s.mode !== 'admin_return_awaiting_sample') {
+        answerCallbackQuery(callbackId, 'Sessiya topilmadi.');
+        return;
+      }
+      answerCallbackQuery(callbackId, '');
+      await finalizeDocReturn(chatId, s, null, null);
+      return;
+    }
+
     if (!s || s.mode !== 'admin_return_selecting_docs') {
       answerCallbackQuery(callbackId, 'Sessiya topilmadi.');
       return;
     }
-    const action = data.substring(6);
 
     if (action === 'cancel') {
       userStates.delete(chatId);
@@ -2030,30 +2274,23 @@ async function handleCallback(callback) {
         return;
       }
       answerCallbackQuery(callbackId, '');
-
-      const rowData = await getRowData(s.row);
-      const currentMissing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
-      // Tanlangan kodlarni "kam hujjatlar" ro'yxatiga qaytarish
-      // (takrorlanmasin, shuning uchun Set orqali birlashtiriladi)
-      const newMissing = Array.from(new Set([...currentMissing, ...s.selectedCodes]));
-      const cellValue = newMissing.join(', ');
-      await updateCell(`${DRAFT_SHEET}!AN${s.row}`, cellValue);
-      // STATUS'ni qaytarish — eslatma tsikli qayta ishga tushishi uchun
-      await updateCell(`${DRAFT_SHEET}!B${s.row}`, 'MA\'LUMOT TASDIQLANDI');
-
-      const studentChatId = rowData[TELEGRAM_CHAT_ID_COLUMN];
-      if (studentChatId) {
-        const labels = s.selectedCodes.map((code) => {
-          const doc = DOCUMENT_TYPES.find((d) => d.code === code);
-          return `\u2022 ${doc ? doc.label : code}`;
-        }).join('\n');
-        await sendMessage(studentChatId,
-          `Diqqat! Quyidagi hujjat(lar)ni qayta topshirishingiz kerak:\n\n${labels}\n\nIltimos, to'g'ri hujjatni qayta yuboring.`,
-          buildDocumentMenuKeyboard(newMissing));
-      }
-
-      await sendMessage(chatId, `Shartnoma ${s.contractId} uchun ${s.selectedCodes.length} ta hujjat qaytarildi. Talabaga xabar berildi.`);
-      userStates.delete(chatId);
+      // Hujjatlarni darhol qaytarmasdan, avval SABABNI so'raymiz —
+      // talaba nima uchun qabul qilinmaganini va qanday yuborish
+      // kerakligini aniq bilishi kerak.
+      s.mode = 'admin_return_awaiting_reason';
+      userStates.set(chatId, s);
+      const labels = s.selectedCodes.map((code) => {
+        const doc = DOCUMENT_TYPES.find((d) => d.code === code);
+        return `\u2022 ${doc ? doc.label : code}`;
+      }).join('\n');
+      await sendMessage(chatId,
+        `Qaytariladigan hujjatlar:\n${labels}\n\n`
+        + 'Endi SABABNI yozing — talaba nima uchun qabul qilinmaganini va '
+        + 'qanday holatda qayta yuborishi kerakligini tushunadigan qilib '
+        + 'tushuntiring.\n\n'
+        + 'Misol: "Passport rasmi xira chiqqan, raqamlar o\'qilmayapti. '
+        + 'Yorug\' joyda, soyasiz, to\'liq sahifani suratga oling."\n\n'
+        + 'Sababni yozgandan keyin xohlasangiz NAMUNA rasm ham yuborishingiz mumkin.');
       return;
     }
 
@@ -2228,7 +2465,8 @@ async function handleCallback(callback) {
     session.mode = 'awaiting_document';
     session.docCode = code;
     userStates.set(chatId, session);
-    await sendMessage(chatId, 'Hujjat fayli yoki rasmini yuboring:');
+    // Talablar va namunani ko'rsatib, keyin fayl so'raymiz
+    await sendDocRequirements(chatId, code);
     return;
   }
 
