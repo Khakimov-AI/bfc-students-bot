@@ -289,6 +289,7 @@ function sendMessage(chatId, text, replyMarkup, threadId) {
         try { resolve(JSON.parse(body)); } catch (e) { resolve(null); }
       });
     });
+    req.setTimeout(15000, () => req.destroy(new Error('sendMessage timeout')));
     req.on('error', reject);
     req.write(data);
     req.end();
@@ -1301,9 +1302,42 @@ function getUpdateChatId(body) {
   return null;
 }
 
+// So'rov navbatda cheksiz "osilib qolmasligi" uchun vaqt chegarasi.
+// Agar bitta so'rov shu vaqtdan uzoq davom etsa, navbat DAVOM ETADI
+// (keyingi so'rovlar kutib qolmaydi) — garchi eski so'rovning o'zi
+// fonda hali tugamagan bo'lsa ham.
+const CHAT_TASK_TIMEOUT_MS = 8000; // 8 soniya
+
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.error(`Navbat vaqti tugadi (${ms}ms): ${label} — keyingi so'rovga o'tildi.`);
+      resolve();
+    }, ms);
+    promise.then(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    }).catch((err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      console.error(`Navbatdagi vazifa xatosi (${label}):`, err);
+      resolve();
+    });
+  });
+}
+
 async function enqueueForChat(chatId, task) {
   const prev = chatQueues.get(chatId) || Promise.resolve();
-  const next = prev.then(task, task); // oldingi xato bo'lsa ham davom etamiz
+  const next = prev.then(
+    () => withTimeout(task(), CHAT_TASK_TIMEOUT_MS, `chat ${chatId}`),
+    () => withTimeout(task(), CHAT_TASK_TIMEOUT_MS, `chat ${chatId}`),
+  );
   // Xotira sizib chiqmasligi uchun, navbat bo'sh bo'lgach tozalaymiz
   chatQueues.set(chatId, next.catch(() => {}));
   return next;
