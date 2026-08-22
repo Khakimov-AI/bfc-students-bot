@@ -2852,13 +2852,16 @@ async function runStatusWatchTick() {
       if (!contractId || !status || !chatId) continue;
       if (status === lastNotified) continue; // o'zgarish yo'q
 
-      const msg = STATUS_MESSAGES[status.toUpperCase()];
-      // Har doim "oxirgi xabar berilgan holat"ni yangilaymiz — hatto
-      // matn topilmasa ham (aks holda notanish STATUS qiymatida
-      // botunutmasdan qayta-qayta tekshirib turadi va hech narsa
-      // yubormaydi, lekin loop shart emas).
+      // MUHIM: agar AS hali bo'sh bo'lsa (bu qator uchun birinchi
+      // marta tekshirilmoqda — masalan yangi ustun qo'shilgandan
+      // keyingi birinchi tick), xabar YUBORILMAYDI — faqat asos
+      // (baseline) o'rnatiladi. Aks holda deploy paytida BARCHA
+      // talabalarga notoentr xabar ketib qoladi.
+      const isFirstCheck = lastNotified === '';
       await updateCell(`${DB_SHEET}!AS${rowNum}`, status);
+      if (isFirstCheck) continue;
 
+      const msg = STATUS_MESSAGES[status.toUpperCase()];
       if (msg) {
         await sendMessage(chatId, `📢 Holatingiz yangilandi:\n\n${msg}`);
         console.log(`Status xabari yuborildi: ${contractId} -> ${status}`);
