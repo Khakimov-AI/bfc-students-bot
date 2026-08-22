@@ -32,8 +32,47 @@
 // VALIDATORLAR
 // ---------------------------------------------------------------------
 const validators = {
-  fullName: (v) => v.trim().split(/\s+/).length >= 2,
-  phone: (v) => /^\d{9}$/.test(v.replace(/\D/g, '')),
+  // To'liq ism — ZAGRAN passport yozuvi bo'yicha:
+  //   • FAQAT lotin harflari va bo'sh joy (apostrof, kirill YO'Q)
+  //     "O'G'LI" ❌   "UGLI" ✅   "KHAKIMJONOV" ✅
+  //   • kamida 3 ta so'z (familya + ism + otasining ismi)
+  //   • "UGLI/QIZI/KIZI" qo'shimchasi alohida so'z sifatida sanalmaydi
+  //   • takrorlanuvchi so'zlar (A A A) rad etiladi
+  fullName: (v) => {
+    const cleaned = v.trim().replace(/\s+/g, ' ');
+    // Faqat lotin harflari va bo'sh joy
+    if (!/^[A-Za-z ]+$/.test(cleaned)) return false;
+    const parts = cleaned.split(' ');
+    const SUFFIX = ['UGLI', 'QIZI', 'KIZI'];
+    const last = parts[parts.length - 1].toUpperCase();
+    const core = SUFFIX.includes(last) ? parts.slice(0, -1) : parts;
+    if (core.length < 3) return false;
+    if (!core.every((w) => w.length >= 2)) return false;
+    const lower = core.map((w) => w.toLowerCase());
+    if (new Set(lower).size < core.length) return false;
+    return true;
+  },
+  // Telefon: ANIQ 9 ta raqam, bo'sh joy/chiziqcha/qavssiz
+  phone: (v) => /^\d{9}$/.test(v.trim()),
+  // Kasb (erkin matn): kamida 3 belgi, faqat harf va bo'sh joy,
+  // kamida bitta unli, bir xil harf 3 marta ketma-ket takrorlanmasin
+  job: (v) => {
+    const s = v.trim();
+    if (s.length < 3) return false;
+    if (!/^[A-Za-zÀ-ÿЀ-ӿ'’`\-\s]+$/.test(s)) return false;
+    if (!/[aeiouAEIOUаеёиоуыэюяАЕЁИОУЫЭЮЯ]/.test(s)) return false;
+    if (/(.)\1{2,}/.test(s)) return false;
+    return true;
+  },
+  // Sertifikat ballari — tur bo'yicha alohida
+  toeflScore: (v) => {
+    const n = parseInt(v.trim(), 10);
+    return /^\d{2,3}$/.test(v.trim()) && n >= 71 && n <= 120;
+  },
+  skaScore: (v) => {
+    const n = parseInt(v.trim(), 10);
+    return /^\d{3}$/.test(v.trim()) && n >= 201 && n <= 800;
+  },
   email: (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim()),
   dob: (v) => /^\d{4}\.\d{2}\.\d{2}$/.test(v.trim()),
   jshshir: (v) => /^\d{14}$/.test(v.trim()),
@@ -46,8 +85,15 @@ const validators = {
   passport: (v) => /^[A-Za-z]{2}\d{7}$/.test(v.trim().replace(/\s/g, '')),
 };
 
-const REGION_OPTIONS = [
-  'ANDIJAN', 'NAMANGAN', "FARG'ONA", 'TOSHKENT', 'SAMARQAND',
+// Eng ko'p uchraydigan kasblar — tugma sifatida taklif qilinadi.
+// Ro'yxatda bo'lmasa, "Boshqa" tugmasi orqali erkin matn kiritiladi.
+const JOB_OPTIONS = [
+  'Tadbirkor', 'Haydovchi', "O'qituvchi", 'Shifokor',
+  'Quruvchi', 'Fermer', 'Ishchi', 'Savdogar',
+  'Uy bekasi', 'Nafaqada', 'Ishsiz', 'Chet elda ishlaydi',
+];
+
+const REGION_OPTIONS = [  'ANDIJAN', 'NAMANGAN', "FARG'ONA", 'TOSHKENT', 'SAMARQAND',
   'SIRDARYO', 'BUXORO', 'JIZZAX', 'QASHQADARYO', 'SURXANDARYO',
   'NAVOIY', 'NUKUS', 'XORAZM',
 ];
@@ -61,6 +107,7 @@ const STUDENT_STEPS = {
 
   // --- 0. DASTUR TANLASH (birinchi savol, ID tasdiqlangandan keyin) ---
   program_selection: {
+    label: 'Dastur',
     type: 'buttons',
     question: 'Qaysi dastur asosida Koreaga ketayotganingizni tanlang:',
     options: [
@@ -75,6 +122,7 @@ const STUDENT_STEPS = {
 
   // --- ZAGRAN bor/yo'q (endi ID tasdiqlangandan keyin, ismdan OLDIN) ---
   zagran_status: {
+    label: 'Zagran passport',
     type: 'buttons',
     question: 'Chet elga chiqish (zagran) pasportingiz bormi?',
     options: [
@@ -85,6 +133,7 @@ const STUDENT_STEPS = {
     next: (data) => (data.zagran_status === 'BOR' ? 'passport_number' : 'full_name_warning'),
   },
   passport_number: {
+    label: 'Passport raqami',
     type: 'text',
     question: 'NAMUNA: FB1234567 (bo\'sh joysiz, ketma-ket kiriting)\n\nZagran pasport seriya-raqamingizni kiriting:',
     validate: validators.passport,
@@ -102,26 +151,37 @@ const STUDENT_STEPS = {
     next: () => 'full_name',
   },
   full_name: {
+    label: 'Ism-familya',
     type: 'text',
-    question: 'NAMUNA: OLIMOV JASURBEK TOHIRJON UGLI\n\nTo\'liq ism-familyangizni shu ko\'rinishda kiriting:',
+    question: 'NAMUNA: KHAKIMJONOV ABDULMUKHTOR BAKHTIYORJON UGLI\n\n'
+      + 'DIQQAT: Zagran passportda yozilganidek, LOTIN harflarida kiriting.\n'
+      + '• Apostrof (\') ishlatilmaydi: O\'G\'LI emas — UGLI\n'
+      + '• "X" o\'rniga ko\'pincha "KH" yoziladi: XAKIMOV emas — KHAKIMOV\n'
+      + '• To\'liq: familya + ism + otasining ismi\n\n'
+      + 'To\'liq ism-familyangizni kiriting:',
     validate: validators.fullName,
-    errorMsg: 'Namunadagidek to\'liq ism-familyani kiriting.',
+    errorMsg: 'Ism zagran passportdagidek bo\'lishi kerak:\n'
+      + '• Faqat lotin harflari (apostrof va kirill yozuv qabul qilinmaydi)\n'
+      + '• Kamida 3 ta so\'z: familya + ism + otasining ismi\n\n'
+      + 'NAMUNA: KHAKIMJONOV ABDULMUKHTOR BAKHTIYORJON UGLI',
     sheetCol: 'E', // FULL NAME
     next: () => 'phone',
   },
 
   // --- 2. TELEFON ---
   phone: {
+    label: 'Telefon',
     type: 'text',
-    question: 'Telefon raqamingizni 9 ta raqam bilan kiriting (masalan: 901234567):',
+    question: 'Telefon raqamingizni kiriting.\n\nFaqat 9 ta raqam, bo\'sh joy va chiziqchasiz.\nNAMUNA: 901234567',
     validate: validators.phone,
-    errorMsg: '9 ta raqamdan iborat bo\'lishi kerak. Qayta kiriting.',
+    errorMsg: 'Faqat 9 ta raqam kiriting — bo\'sh joy, chiziqcha yoki qavs ishlatmang.\nNAMUNA: 901234567',
     sheetCol: 'Q', // PHONE
     next: () => 'email',
   },
 
   // --- 3. GMAIL ---
   email: {
+    label: 'E-mail',
     type: 'text',
     question: 'Elektron pochta (gmail) manzilingizni kiriting:',
     validate: validators.email,
@@ -132,6 +192,7 @@ const STUDENT_STEPS = {
 
   // --- 4. TUG'ILGAN SANA ---
   dob: {
+    label: 'Tug\'ilgan sana',
     type: 'text',
     question: 'Tug\'ilgan sanangizni YYYY.MM.DD formatida kiriting (masalan: 2005.03.21):',
     validate: validators.dob,
@@ -142,6 +203,7 @@ const STUDENT_STEPS = {
 
   // --- 5. JINSI ---
   gender: {
+    label: 'Jinsi',
     type: 'buttons',
     question: 'Jinsingizni tanlang:',
     options: [
@@ -154,6 +216,7 @@ const STUDENT_STEPS = {
 
   // --- 6. JSHSHIR ---
   jshshir: {
+    label: 'JSHSHIR',
     type: 'text',
     question: 'JSHSHIR raqamingizni kiriting (14 ta raqam):',
     validate: validators.jshshir,
@@ -164,6 +227,7 @@ const STUDENT_STEPS = {
 
   // --- 7. SERTIFIKAT (murakkab shoxlanish) ---
   certificate_status: {
+    label: 'Sertifikat holati',
     type: 'buttons',
     question: 'Til sertifikatingiz bormi?',
     options: [
@@ -187,6 +251,7 @@ const STUDENT_STEPS = {
     },
   },
   certificate_type: {
+    label: 'Sertifikat turi',
     type: 'buttons',
     question: 'Sertifikat turini tanlang:',
     options: [
@@ -196,19 +261,61 @@ const STUDENT_STEPS = {
       { text: 'SKA', value: 'SKA' },
     ],
     sheetCol: 'J', // CERTIFICATE
-    next: () => 'certificate_score',
+    next: (data) => {
+      const t = data.certificate_type;
+      if (t === 'IELTS') return 'cert_score_ielts';
+      if (t === 'TOPIK') return 'cert_score_topik';
+      if (t === 'TOEFL') return 'cert_score_toefl';
+      return 'cert_score_ska';
+    },
   },
-  certificate_score: {
-    type: 'text',
-    question: 'Sertifikat bahoingizni kiriting:',
-    validate: validators.notEmpty,
+
+  // --- Sertifikat ballari — tur bo'yicha alohida ---
+  cert_score_ielts: {
+    label: 'IELTS ball',
+    type: 'buttons',
+    question: 'IELTS ballingizni tanlang:',
+    options: [
+      { text: '5,5', value: '5.5' }, { text: '6,0', value: '6.0' },
+      { text: '6,5', value: '6.5' }, { text: '7,0', value: '7.0' },
+      { text: '7,5', value: '7.5' }, { text: '8,0', value: '8.0' },
+      { text: '8,5', value: '8.5' }, { text: '9,0', value: '9.0' },
+    ],
     sheetCol: 'K', // SCORE
-    // Sertifikat ALLAQACHON qo'lida bo'lgan talaba uchun imtihon sanasi
-    // so'ralmaydi — bu savol faqat TAKER (hali imtihon topshirmagan)
-    // uchun kerak.
+    next: () => 'asosiy_maqsad',
+  },
+  cert_score_topik: {
+    label: 'TOPIK daraja',
+    type: 'buttons',
+    question: 'TOPIK darajangizni tanlang:',
+    options: [
+      { text: '2', value: '2' }, { text: '3', value: '3' },
+      { text: '4', value: '4' }, { text: '5', value: '5' },
+      { text: '6', value: '6' },
+    ],
+    sheetCol: 'K',
+    next: () => 'asosiy_maqsad',
+  },
+  cert_score_toefl: {
+    label: 'TOEFL ball',
+    type: 'text',
+    question: 'Sertifikat ballingizni kiriting:',
+    validate: validators.toeflScore,
+    errorMsg: 'Talabadan o\'qishga topshirayotgan paytda eng past 71 balldan eng yuqori 120 ballgacha mezon qo\'yilgan. TOEFL ballingizni tekshirib qayta kiriting!',
+    sheetCol: 'K',
+    next: () => 'asosiy_maqsad',
+  },
+  cert_score_ska: {
+    label: 'SKA ball',
+    type: 'text',
+    question: 'Sertifikat ballingizni kiriting:',
+    validate: validators.skaScore,
+    errorMsg: 'Talabadan o\'qishga topshirayotgan paytda eng past 201 balldan eng yuqori 800 ballgacha mezon qo\'yilgan. SKA ballingizni tekshirib qayta kiriting!',
+    sheetCol: 'K',
     next: () => 'asosiy_maqsad',
   },
   certificate_type_taker: {
+    label: 'Imtihon turi (Taker)',
     type: 'buttons',
     question: 'TAKER — qaysi imtihonga yozilgansiz?',
     options: [
@@ -221,6 +328,7 @@ const STUDENT_STEPS = {
     next: (data) => (data.certificate_type_taker === 'TOPIK' ? 'test_report_number' : 'exam_date'),
   },
   test_report_number: {
+    label: 'TOPIK test raqami',
     type: 'text',
     question: 'TOPIK test hisobot raqamini (Test Report Number) kiriting:',
     validate: validators.notEmpty,
@@ -228,6 +336,7 @@ const STUDENT_STEPS = {
     next: () => 'exam_date',
   },
   exam_date: {
+    label: 'Imtihon sanasi',
     type: 'buttons_then_text',
     question: 'Imtihon topshirish sanasi ma\'lummi?',
     options: [
@@ -245,6 +354,7 @@ const STUDENT_STEPS = {
 
   // --- 8. MAQSAD ---
   asosiy_maqsad: {
+    label: 'Asosiy maqsad',
     type: 'buttons',
     question: 'Koreaga borishdan maqsadingiz:',
     options: [
@@ -278,6 +388,7 @@ const STUDENT_STEPS = {
     next: () => 'mother_status',
   },
   father_name: {
+    label: 'Otasining ismi',
     type: 'text',
     question: 'Otangizning to\'liq ism-familyasini kiriting:',
     validate: validators.notEmpty,
@@ -285,16 +396,31 @@ const STUDENT_STEPS = {
     next: () => 'father_job',
   },
   father_job: {
-    type: 'text',
-    question: 'Otangizning kasbini kiriting:',
-    validate: validators.notEmpty,
+    label: 'Otasining kasbi',
+    type: 'buttons',
+    question: 'Otangizning kasbini tanlang:',
+    options: [
+      ...JOB_OPTIONS.map((j) => ({ text: j, value: j })),
+      { text: 'Boshqa (o\'zim yozaman)', value: 'OTHER' },
+    ],
     sheetCol: 'AH', // JOB (father)
+    next: (data) => (data.father_job === 'OTHER' ? 'father_job_custom' : 'father_phone'),
+  },
+  father_job_custom: {
+    label: 'Otasining kasbi',
+    type: 'text',
+    question: 'Otangizni kasbini kiriting:',
+    validate: validators.job,
+    errorMsg: 'Haqiqiy kasb kiriting',
+    sheetCol: 'AH',
     next: () => 'father_phone',
   },
   father_phone: {
+    label: 'Otasining telefoni',
     type: 'text',
-    question: 'Otangizning telefon raqamini kiriting (9 ta raqam):',
+    question: 'Otangizning telefon raqamini kiriting.\n\nFaqat 9 ta raqam, bo\'sh joysiz.\nNAMUNA: 901234567',
     validate: validators.phone,
+    errorMsg: 'Faqat 9 ta raqam kiriting — bo\'sh joy, chiziqcha yoki qavs ishlatmang.\nNAMUNA: 901234567',
     sheetCol: 'AG', // PHONE NUMBER (father)
     next: () => 'mother_status',
   },
@@ -318,6 +444,7 @@ const STUDENT_STEPS = {
     next: () => 'address',
   },
   mother_name: {
+    label: 'Onasining ismi',
     type: 'text',
     question: 'Onangizning to\'liq ism-familyasini kiriting:',
     validate: validators.notEmpty,
@@ -325,44 +452,47 @@ const STUDENT_STEPS = {
     next: () => 'mother_job',
   },
   mother_job: {
-    type: 'text',
-    question: 'Onangizning kasbini kiriting:',
-    validate: validators.notEmpty,
+    label: 'Onasining kasbi',
+    type: 'buttons',
+    question: 'Onangizning kasbini tanlang:',
+    options: [
+      ...JOB_OPTIONS.map((j) => ({ text: j, value: j })),
+      { text: 'Boshqa (o\'zim yozaman)', value: 'OTHER' },
+    ],
     sheetCol: 'AK', // JOB (mother)
+    next: (data) => (data.mother_job === 'OTHER' ? 'mother_job_custom' : 'mother_phone'),
+  },
+  mother_job_custom: {
+    label: 'Onasining kasbi',
+    type: 'text',
+    question: 'Onangizni kasbini kiriting:',
+    validate: validators.job,
+    errorMsg: 'Haqiqiy kasb kiriting',
+    sheetCol: 'AK',
     next: () => 'mother_phone',
   },
   mother_phone: {
+    label: 'Onasining telefoni',
     type: 'text',
-    question: 'Onangizning telefon raqamini kiriting (9 ta raqam):',
+    question: 'Onangizning telefon raqamini kiriting.\n\nFaqat 9 ta raqam, bo\'sh joysiz.\nNAMUNA: 901234567',
     validate: validators.phone,
+    errorMsg: 'Faqat 9 ta raqam kiriting — bo\'sh joy, chiziqcha yoki qavs ishlatmang.\nNAMUNA: 901234567',
     sheetCol: 'AJ', // PHONE NUMBER (mother)
     next: () => 'address',
   },
 
   // --- 11. MANZIL + ZIP ---
   address: {
+    label: 'Manzil',
     type: 'text',
     question: 'NAMUNA: Andijon, Andijon tumani, Qandolatchilar ko\'chasi 3\n\nYashaydigan to\'liq manzilingizni shu tartibda kiriting:',
     validate: validators.notEmpty,
     errorMsg: 'Manzilni namunadagi tartibda to\'liq kiriting.',
     sheetCol: 'S', // ADRESS
-    next: () => 'zip_code',
-  },
-  zip_code: {
-    type: 'text',
-    question: 'Pochta indeksi (zip code) — bu yashash manzilingizga biriktirilgan 6 xonali raqam.\n\n'
-      + 'Qanday topish mumkin:\n'
-      + '\u2022 Pasportingizdagi propiska (ro\'yxatga olish) sahifasida yozilgan bo\'ladi\n'
-      + '\u2022 Yoki Google\'da qidiring: "Andijon tumani pochta indeksi"\n'
-      + '\u2022 Yoki mahalla qo\'mitasidan so\'rashingiz mumkin\n\n'
-      + 'NAMUNA: 170100\n\n'
-      + 'O\'zingizning pochta indeksingizni kiriting:',
-    validate: validators.zipCode,
-    errorMsg: 'Pochta indeksi 5-6 ta raqamdan iborat bo\'lishi kerak (masalan: 170100). Qayta kiriting.',
-    sheetCol: 'T', // ZIP CODE
     next: () => 'region',
   },
   region: {
+    label: 'Viloyat',
     type: 'buttons',
     question: 'Qaysi viloyatdan ekanligingizni tanlang:',
     options: REGION_OPTIONS.map((r) => ({ text: r, value: r })),
@@ -382,6 +512,7 @@ const STUDENT_STEPS = {
     next: (data) => (data.rejection_history === 'HA' ? 'rejection_detail' : 'school_name'),
   },
   rejection_detail: {
+    label: 'Viza rad sababi',
     type: 'text',
     question: 'Qaysi band bilan rad javobi olganingizni kiriting:',
     validate: validators.notEmpty,
@@ -391,6 +522,7 @@ const STUDENT_STEPS = {
 
   // --- 13. TA'LIM MUASSASASI ---
   school_name: {
+    label: 'Ta\'lim muassasasi',
     type: 'text',
     question: 'Eng oxirgi bitirgan (yoki bitirayotgan) ta\'lim muassasasi nomini kiriting:',
     validate: validators.notEmpty,
@@ -408,6 +540,7 @@ const STUDENT_STEPS = {
     next: () => 'graduation_date',
   },
   graduation_date: {
+    label: 'Bitirgan sana',
     type: 'text',
     question: (data) => data.graduating_this_year === 'EXPECTED'
       ? 'Taxminiy bitirish sanangizni kiriting (YYYY.MM):'
@@ -417,12 +550,14 @@ const STUDENT_STEPS = {
     next: (data) => (data.graduating_this_year === 'EXPECTED' ? 'gpa_expected' : 'gpa_known'),
   },
   gpa_expected: {
+    label: 'GPA',
     type: 'skip', // avtomatik "EXPECTED" yoziladi, savol berilmaydi
     sheetCol: 'Y', // GPA
     autoValue: 'EXPECTED',
     next: () => 'master_major_gate',
   },
   gpa_known: {
+    label: 'GPA',
     type: 'text',
     question: 'O\'rtacha bahoingiz (GPA)ni kiriting:',
     validate: validators.gpa,
@@ -444,6 +579,7 @@ const STUDENT_STEPS = {
     ifNoMatchNext: 'preferred_region',
   },
   master_major: {
+    label: 'Bakalavr sohasi',
     type: 'text',
     question: 'Bakalavr bosqichida qaysi sohani tugatganingizni kiriting:',
     validate: validators.notEmpty,
@@ -453,6 +589,7 @@ const STUDENT_STEPS = {
 
   // --- 15. O'QIMOQCHI BO'LGAN HUDUD (erkin matn — o'zgarishsiz) ---
   preferred_region: {
+    label: 'Afzal shahar',
     type: 'text',
     question: 'Koreyaning qaysi hududi (shahri) sizga qulayroq bo\'lishini yozib bering:',
     validate: validators.notEmpty,

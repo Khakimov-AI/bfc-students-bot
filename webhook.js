@@ -175,6 +175,11 @@ function isBoss(chatId) {
   return BOSS_CHAT_ID && String(chatId) === String(BOSS_CHAT_ID);
 }
 
+// E'tiroz va shikoyatlar yuboriladigan guruh/topic.
+// Coolify env: COMPLAINT_GROUP_CHAT_ID va COMPLAINT_TOPIC_ID
+const COMPLAINT_GROUP_CHAT_ID = process.env.COMPLAINT_GROUP_CHAT_ID || '';
+const COMPLAINT_TOPIC_ID = process.env.COMPLAINT_TOPIC_ID || '';
+
 // Supervisorlar — vergul bilan ajratilgan chat_id ro'yxati.
 // Masalan: SUPERVISOR_CHAT_IDS=123456,789012
 const SUPERVISOR_CHAT_IDS = String(process.env.SUPERVISOR_CHAT_IDS || '')
@@ -304,8 +309,23 @@ function answerCallbackQuery(callbackQueryId, text) {
   req.end();
 }
 
-function editMessageReplyMarkup(chatId, messageId, replyMarkup) {
-  const data = JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: replyMarkup });
+function editMessageText(chatId, messageId, text, replyMarkup) {
+  const payload = { chat_id: chatId, message_id: messageId, text };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  const data = JSON.stringify(payload);
+  const options = {
+    hostname: 'api.telegram.org',
+    path: `/bot${BOT_TOKEN}/editMessageText`,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+  };
+  const req = https.request(options, (res) => { res.on('data', () => {}); res.on('end', () => {}); });
+  req.on('error', (e) => console.error('editMessageText xato:', e));
+  req.write(data);
+  req.end();
+}
+
+function editMessageReplyMarkup(chatId, messageId, replyMarkup) {  const data = JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: replyMarkup });
   const options = {
     hostname: 'api.telegram.org',
     path: `/bot${BOT_TOKEN}/editMessageReplyMarkup`,
@@ -617,6 +637,7 @@ const BTN = {
   CONTACTS: '☎️ Aloqa',
   FAQ_EDIT: '✏️ FAQ tahrirlash',
   COMPLAINT: '📣 E\'tiroz va shikoyatlar',
+  HIDE: '⌨️ Tugmalarni yashirish',
   // Admin
   RETURN_DOC: '♻️ Hujjatni qaytarish',
   GET_DOCS: '📥 Talaba hujjatlari',
@@ -634,6 +655,7 @@ function studentReplyKeyboard() {
       [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
       [{ text: BTN.COMPLAINT }],
       [{ text: BTN.GUIDE }, { text: BTN.RESTART }],
+      [{ text: BTN.HIDE }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -647,7 +669,7 @@ function adminReplyKeyboard() {
       [{ text: BTN.VISA }, { text: BTN.REPORT }],
       [{ text: BTN.SUMMARY }, { text: BTN.FAQ_EDIT }],
       [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
-      [{ text: BTN.GUIDE }],
+      [{ text: BTN.GUIDE }, { text: BTN.HIDE }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -660,7 +682,7 @@ function bossReplyKeyboard() {
       [{ text: BTN.REPORT }, { text: BTN.SUMMARY }],
       [{ text: BTN.GET_DOCS }, { text: BTN.FAQ_EDIT }],
       [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
-      [{ text: BTN.GUIDE }],
+      [{ text: BTN.GUIDE }, { text: BTN.HIDE }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -673,6 +695,7 @@ function supervisorReplyKeyboard() {
       [{ text: BTN.FAQ_EDIT }, { text: BTN.GET_DOCS }],
       [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
       [{ text: BTN.FAQ }, { text: BTN.GUIDE }],
+      [{ text: BTN.HIDE }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -1015,8 +1038,14 @@ function buildAdminDocSelectKeyboard(selectedCodes) {
 }
 
 function buildEditFieldKeyboard() {
-  const editable = Object.entries(STUDENT_STEPS).filter(([, s]) => s.sheetCol && s.type !== 'skip');
-  const rows = editable.map(([key, s]) => [{ text: s.question && typeof s.question === 'string' ? s.question.split('\n').pop().slice(0, 40) : key, callback_data: `edit:${key}` }]);
+  const seen = new Set();
+  const rows = [];
+  for (const [key, s] of Object.entries(STUDENT_STEPS)) {
+    if (!s.sheetCol || s.type === 'skip') continue;
+    if (seen.has(s.sheetCol)) continue;
+    seen.add(s.sheetCol);
+    rows.push([{ text: s.label || key, callback_data: `edit:${key}` }]);
+  }
   rows.push([{ text: '\u2190 Bekor qilish', callback_data: 'edit:cancel' }]);
   return { inline_keyboard: rows };
 }
@@ -1062,10 +1091,26 @@ async function renderStep(chatId, rowNum, stepKey, sessionData) {
 
   if (step.type === 'confirm_summary') {
     const rowData = await getRowData(rowNum);
-    const lines = Object.entries(STUDENT_STEPS)
-      .filter(([, s]) => s.sheetCol && s.type !== 'skip')
-      .map(([, s]) => `${rowData[s.sheetCol] || '-'}`);
-    await sendMessage(chatId, 'Barcha ma\'lumotlaringiz:\n\n' + lines.join('\n') + '\n\nTasdiqlaysizmi?', buildConfirmSummaryKeyboard());
+    // Har bir maydon: tartib raqam + savol nomi + javob.
+    // Bir xil ustunga yozadigan variantlar (masalan IELTS/TOPIK ball)
+    // takrorlanmasligi uchun ustun bo'yicha filtrlanadi.
+    const seenCols = new Set();
+    const lines = [];
+    let n = 1;
+    for (const [key, s] of Object.entries(STUDENT_STEPS)) {
+      if (!s.sheetCol || s.type === 'skip') continue;
+      if (seenCols.has(s.sheetCol)) continue;
+      const val = String(rowData[s.sheetCol] || '').trim();
+      if (!val) continue; // bo'sh maydonlar ko'rsatilmaydi
+      seenCols.add(s.sheetCol);
+      const label = s.label || key;
+      lines.push(`${n}. ${label}: ${val}`);
+      n++;
+    }
+    await sendMessage(chatId,
+      'Barcha ma\'lumotlaringizni tekshiring:\n\n' + lines.join('\n')
+      + '\n\nHammasi to\'g\'rimi?',
+      buildConfirmSummaryKeyboard());
     return;
   }
 
@@ -1124,7 +1169,11 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
     }
   }
 
-  await writeStepValue(rowNum, step.sheetCol, trimmedValue);
+  // "OTHER" — bu texnik qiymat (erkin matn so'rashga o'tish uchun),
+  // Sheet'ga yozilmaydi. Haqiqiy qiymat keyingi qadamda yoziladi.
+  if (trimmedValue !== 'OTHER') {
+    await writeStepValue(rowNum, step.sheetCol, trimmedValue);
+  }
 
   // Tahrirlash rejimida bo'lsa — javobni yozib, to'g'ridan-to'g'ri
   // tasdiqlash sahifasiga qaytariladi (oddiy zanjirni davom ettirmaydi).
@@ -1328,6 +1377,15 @@ app.post('/webhook', async (req, res) => {
     // =================================================================
     {
       const s = userStates.get(chatId) || {};
+
+      if (text === BTN.HIDE) {
+        // Reply keyboard'ni yig'ish. Qaytarish uchun /menu yoki
+        // xabar maydonining o'ng tomonidagi ⊞ belgisi.
+        await sendMessage(chatId,
+          'Tugmalar yashirildi.\n\nQaytarish uchun /menu buyrug\'ini yuboring.',
+          { remove_keyboard: true });
+        return res.sendStatus(200);
+      }
 
       if (text === BTN.COMPLAINT) {
         const s2 = userStates.get(chatId) || {};
@@ -1590,6 +1648,12 @@ app.post('/webhook', async (req, res) => {
         + (fullName ? `Ism: ${fullName}\n` : '')
         + `Telegram: @${username || 'yo\'q'}\n\n`
         + `Matn: ${complaintText}`;
+      // 1-manzil: "BF Family" guruhidagi "E'tirozlar" topic'i
+      if (COMPLAINT_GROUP_CHAT_ID) {
+        await sendMessage(COMPLAINT_GROUP_CHAT_ID, notice, null,
+          COMPLAINT_TOPIC_ID ? Number(COMPLAINT_TOPIC_ID) : undefined);
+      }
+      // 2-manzil: rahbariyat va supervisorlarga shaxsiy (zaxira)
       if (BOSS_CHAT_ID) await sendMessage(BOSS_CHAT_ID, notice);
       if (ADMIN_NOTIFY_CHAT_ID && String(ADMIN_NOTIFY_CHAT_ID) !== String(BOSS_CHAT_ID)) {
         await sendMessage(ADMIN_NOTIFY_CHAT_ID, notice);
@@ -2319,9 +2383,23 @@ async function handleCallback(callback) {
     const rowData = await getRowData(session.row);
     const currentStepKey = rowData[CURRENT_STEP_COLUMN] || FIRST_STEP;
     const step = STUDENT_STEPS[currentStepKey];
+    const messageId = callback.message.message_id;
+    const originalText = callback.message.text || '';
+
+    // Tanlangan variantning ko'rinadigan nomini topamiz
+    const chosen = (step.options || []).find((o) => o.value === value);
+    const chosenLabel = chosen ? chosen.text : value;
+
+    // TANLOVNI QAYD ETISH: xabar matniga ✅ belgisi qo'shiladi va
+    // qolgan tugmalar o'chiriladi — shunda talaba eski tugmalarni
+    // qayta bosa olmaydi (bu avval xatolarga sabab bo'lgan).
+    const markChosen = () => {
+      editMessageText(chatId, messageId, `${originalText}\n\n✅ Tanlandi: ${chosenLabel}`, null);
+    };
 
     // full_name_warning kabi "ack"-only steplar uchun maxsus holat:
     if (step.sheetCol === null && step.type === 'buttons' && step.options.length === 1) {
+      markChosen();
       const nextKey = step.next({});
       await writeCurrentStep(session.row, nextKey);
       answerCallbackQuery(callbackId, '');
@@ -2330,6 +2408,7 @@ async function handleCallback(callback) {
     }
 
     if (step.type === 'buttons_then_text') {
+      markChosen();
       // Birinchi tugma bosildi (KNOWN/UNKNOWN) — followUp savol yuboriladi
       session.awaitingFollowUp = true;
       session.followUpChoice = value;
@@ -2339,6 +2418,7 @@ async function handleCallback(callback) {
       return;
     }
 
+    markChosen();
     answerCallbackQuery(callbackId, '');
     await handleStepAnswer(chatId, session.row, currentStepKey, value, session);
     return;
