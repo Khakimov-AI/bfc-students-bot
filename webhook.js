@@ -767,19 +767,17 @@ function telegramApi(method, payload) {
 
 /** Umumiy (barcha foydalanuvchilar uchun) buyruqlar ro'yxati */
 async function registerDefaultCommands() {
-  const r = await telegramApi('setMyCommands', {
-    commands: STUDENT_COMMANDS,
-    scope: { type: 'default' },
-  });
-  console.log('setMyCommands (default):', r && r.ok ? 'OK' : JSON.stringify(r));
+  // Ko'k "Menu" tugmasi olib tashlanadi — u pastdagi tugmalar bilan
+  // hech qanday bog'liq emas va foydalanuvchilarni chalkashtirgan.
+  // Endi faqat pastdagi doimiy tugmalar (reply keyboard) ishlatiladi,
+  // ular xabar maydoni yonidagi ⊞ belgisi orqali ochiladi/yopiladi.
+  const r = await telegramApi('deleteMyCommands', { scope: { type: 'default' } });
+  console.log('deleteMyCommands (default):', r && r.ok ? 'OK' : JSON.stringify(r));
 }
 
-/** Admin/Boss uchun shaxsiy chatda kengaytirilgan ro'yxat */
+/** Admin/Boss uchun ham buyruqlar ro'yxati olib tashlanadi */
 async function registerAdminCommands(chatId) {
-  await telegramApi('setMyCommands', {
-    commands: ADMIN_COMMANDS,
-    scope: { type: 'chat', chat_id: chatId },
-  });
+  await telegramApi('deleteMyCommands', { scope: { type: 'chat', chat_id: chatId } });
 }
 
 // ---------------------------------------------------------------------
