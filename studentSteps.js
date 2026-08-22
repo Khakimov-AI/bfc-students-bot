@@ -81,6 +81,16 @@ const validators = {
   gpa: (v) => /^\d(\.\d{1,2})?$/.test(v.trim()) || v.trim().toUpperCase() === 'EXPECTED',
   graduationDate: (v) => /^\d{4}\.\d{2}$/.test(v.trim()) || v.trim().toUpperCase().includes('EXPECTED'),
   notEmpty: (v) => v.trim().length > 0,
+  // Manzil: kamida 3 ta qism (vergul bilan ajratilgan: viloyat, tuman,
+  // ko'cha+uy raqami), oxirgi qismida raqam bo'lishi kerak (uy raqami).
+  address: (v) => {
+    const s = v.trim();
+    if (s.length < 15) return false;
+    const parts = s.split(',').map((p) => p.trim()).filter(Boolean);
+    if (parts.length < 3) return false;
+    if (!parts.some((p) => /\d/.test(p))) return false;
+    return true;
+  },
   // Passport: 2 harf + 7 raqam, bo'sh joysiz (masalan FB1234567)
   passport: (v) => /^[A-Za-z]{2}\d{7}$/.test(v.trim().replace(/\s/g, '')),
 };
@@ -135,7 +145,7 @@ const STUDENT_STEPS = {
   passport_number: {
     label: 'Passport raqami',
     type: 'text',
-    question: 'NAMUNA: FB1234567 (bo\'sh joysiz, ketma-ket kiriting)\n\nZagran pasport seriya-raqamingizni kiriting:',
+    question: 'Zagran pasport seriya-raqamingizni bo\'sh joysiz, ketma-ket kiriting.\n\nNAMUNA: FB1234567',
     validate: validators.passport,
     errorMsg: 'Format noto\'g\'ri. 2 harf + 7 raqam, bo\'sh joysiz kiriting (masalan: FB1234567).',
     sheetCol: 'N', // PASSPORT №
@@ -153,17 +163,17 @@ const STUDENT_STEPS = {
   full_name: {
     label: 'Ism-familya',
     type: 'text',
-    question: 'NAMUNA: KHAKIMJONOV ABDULMUKHTOR BAKHTIYORJON UGLI\n\n'
-      + 'DIQQAT: Zagran passportda yozilganidek, LOTIN harflarida kiriting.\n'
+    question: 'DIQQAT: Zagran passportda yozilganidek, LOTIN harflarida kiriting.\n'
       + '• Apostrof (\') ishlatilmaydi: O\'G\'LI emas — UGLI\n'
       + '• "X" o\'rniga ko\'pincha "KH" yoziladi: XAKIMOV emas — KHAKIMOV\n'
       + '• To\'liq: familya + ism + otasining ismi\n\n'
-      + 'To\'liq ism-familyangizni kiriting:',
+      + 'To\'liq ism-familyangizni kiriting.\n\n'
+      + 'NAMUNA: ABDULLAEV ADBULLAJON ABDULLAJON UGLI',
     validate: validators.fullName,
     errorMsg: 'Ism zagran passportdagidek bo\'lishi kerak:\n'
       + '• Faqat lotin harflari (apostrof va kirill yozuv qabul qilinmaydi)\n'
       + '• Kamida 3 ta so\'z: familya + ism + otasining ismi\n\n'
-      + 'NAMUNA: KHAKIMJONOV ABDULMUKHTOR BAKHTIYORJON UGLI',
+      + 'NAMUNA: ABDULLAEV ADBULLAJON ABDULLAJON UGLI',
     sheetCol: 'E', // FULL NAME
     next: () => 'phone',
   },
@@ -485,9 +495,11 @@ const STUDENT_STEPS = {
   address: {
     label: 'Manzil',
     type: 'text',
-    question: 'NAMUNA: Andijon, Andijon tumani, Qandolatchilar ko\'chasi 3\n\nYashaydigan to\'liq manzilingizni shu tartibda kiriting:',
-    validate: validators.notEmpty,
-    errorMsg: 'Manzilni namunadagi tartibda to\'liq kiriting.',
+    question: 'Yashaydigan to\'liq manzilingizni shu tartibda kiriting: Viloyat, tuman, ko\'cha, uy raqami.\n\n'
+      + 'NAMUNA: Andijon, Andijon tumani, Qandolatchilar ko\'chasi 3',
+    validate: validators.address,
+    errorMsg: 'Manzil namunadagi tartibda, vergul bilan ajratib to\'liq kiritilishi kerak: '
+      + 'Viloyat, tuman, ko\'cha, uy raqami.\n\nNAMUNA: Andijon, Andijon tumani, Qandolatchilar ko\'chasi 3',
     sheetCol: 'S', // ADRESS
     next: () => 'region',
   },
@@ -590,10 +602,28 @@ const STUDENT_STEPS = {
   // --- 15. O'QIMOQCHI BO'LGAN HUDUD (erkin matn — o'zgarishsiz) ---
   preferred_region: {
     label: 'Afzal shahar',
+    type: 'buttons',
+    question: 'Koreyaning qaysi hududi (shahri) sizga qulayroq?',
+    options: [
+      { text: 'Seoul - 서울', value: 'SEOUL' },
+      { text: 'Incheon - 인천', value: 'INCHEON' },
+      { text: 'Cheonan - 천안', value: 'CHEONAN' },
+      { text: 'Daegu - 대구', value: 'DAEGU' },
+      { text: 'Daejon - 대전', value: 'DAEJON' },
+      { text: 'Busan - 부산', value: 'BUSAN' },
+      { text: 'Gwangju (katta) - 광주광역시', value: 'GWANGJU_METRO' },
+      { text: 'Gwangju (kichik) - 광주시', value: 'GWANGJU_CITY' },
+      { text: 'Boshqa', value: 'OTHER' },
+    ],
+    sheetCol: 'AM', // ASOSIY SHAHAR / PREFERRED_REGION
+    next: (data) => (data.preferred_region === 'OTHER' ? 'preferred_region_custom' : 'confirm'),
+  },
+  preferred_region_custom: {
+    label: 'Afzal shahar',
     type: 'text',
     question: 'Koreyaning qaysi hududi (shahri) sizga qulayroq bo\'lishini yozib bering:',
     validate: validators.notEmpty,
-    sheetCol: 'AM', // ASOSIY SHAHAR / PREFERRED_REGION
+    sheetCol: 'AM',
     next: () => 'confirm',
   },
 

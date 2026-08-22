@@ -370,6 +370,7 @@ const DB_COL = {
   ID: 5, FULL_NAME: 6, UNIVERSITY_1: 7, UNIVERSITY_2: 8, AGREEMENT: 9,
   CERT_STATUS: 10, CERTIFICATE: 11, SCORE: 12,
   BRANCH: 13, PHONE: 18, MISSING_DOCS: 41, IZOH: 42, CHAT_ID: 43,
+  LAST_NOTIFIED_STATUS: 44, // AS — bot oxirgi xabar bergan STATUS qiymati
 };
 
 // ---------------------------------------------------------------------
@@ -548,6 +549,8 @@ const STATUS_MESSAGES = {
   "KDB QO'YDI": 'KDB bank hisobingiz ochildi. Elchixona uchun hujjatlar tayyorlanmoqda.',
   'COA OLDI': 'Universitetdan qabul hujjati (COA) olindi. Elchixonaga topshirishga tayyorlanmoqdamiz.',
   'ELCHIXONA': 'Hujjatlaringiz elchixonaga topshirildi. Viza natijasini kutmoqdamiz.',
+  // TODO: Boss aniq matnni tayyorlaganda shu joyni yangilang.
+  "VISAGA TOPSHIRILDI": 'Hujjatlaringiz elchixonaga topshirildi. Ko\'rib chiqish jarayoni odatda 2 hafta bilan 1 oy oralig\'ida davom etadi. Natija chiqishi bilan sizga xabar beramiz.',
   'VIZA TASDIQLANDI': 'Tabriklaymiz! Vizangiz tasdiqlandi. Endi aviabilet masalasiga o\'tamiz.',
   'VIZA RAD QILINDI': 'Afsuski, viza rad etildi. Mas\'ul hodimimiz siz bilan bog\'lanib, keyingi qadamlarni muhokama qiladi.',
   'SHARTNOMA BEKOR QILDI': 'Shartnomangiz bekor qilingan. Savollaringiz bo\'lsa, filialingizga murojaat qiling.',
@@ -645,6 +648,7 @@ const BTN = {
   // Boss
   REPORT: '📊 To\'liq hisobot',
   SUMMARY: '🌙 Kunlik xulosa',
+  ANNOUNCE: '📢 E\'lon yuborish',
 };
 
 function studentReplyKeyboard() {
@@ -668,6 +672,7 @@ function adminReplyKeyboard() {
       [{ text: BTN.RETURN_DOC }, { text: BTN.GET_DOCS }],
       [{ text: BTN.VISA }, { text: BTN.REPORT }],
       [{ text: BTN.SUMMARY }, { text: BTN.FAQ_EDIT }],
+      [{ text: BTN.ANNOUNCE }],
       [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
       [{ text: BTN.GUIDE }, { text: BTN.HIDE }],
     ],
@@ -681,6 +686,7 @@ function bossReplyKeyboard() {
     keyboard: [
       [{ text: BTN.REPORT }, { text: BTN.SUMMARY }],
       [{ text: BTN.GET_DOCS }, { text: BTN.FAQ_EDIT }],
+      [{ text: BTN.ANNOUNCE }],
       [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
       [{ text: BTN.GUIDE }, { text: BTN.HIDE }],
     ],
@@ -693,6 +699,7 @@ function supervisorReplyKeyboard() {
   return {
     keyboard: [
       [{ text: BTN.FAQ_EDIT }, { text: BTN.GET_DOCS }],
+      [{ text: BTN.ANNOUNCE }],
       [{ text: BTN.BRANCHES }, { text: BTN.CONTACTS }],
       [{ text: BTN.FAQ }, { text: BTN.GUIDE }],
       [{ text: BTN.HIDE }],
@@ -1037,11 +1044,20 @@ function buildAdminDocSelectKeyboard(selectedCodes) {
   return { inline_keyboard: rows };
 }
 
+// Bular alohida tahrirlash menyusida ko'rsatilmaydi — sababi: barchasi
+// bitta ustunga (K) yozadi, shuning uchun ro'yxatda faqat bittasi
+// chiqib qolardi va chalkashtirardi. "Sertifikat turi"ni tahrirlash
+// bularni avtomatik qayta so'raydi (EDIT_EXIT_KEYS zanjiri orqali).
+const EXCLUDE_FROM_EDIT_MENU = new Set([
+  'cert_score_ielts', 'cert_score_topik', 'cert_score_toefl', 'cert_score_ska',
+]);
+
 function buildEditFieldKeyboard() {
   const seen = new Set();
   const rows = [];
   for (const [key, s] of Object.entries(STUDENT_STEPS)) {
     if (!s.sheetCol || s.type === 'skip') continue;
+    if (EXCLUDE_FROM_EDIT_MENU.has(key)) continue;
     if (seen.has(s.sheetCol)) continue;
     seen.add(s.sheetCol);
     rows.push([{ text: s.label || key, callback_data: `edit:${key}` }]);
@@ -1054,15 +1070,40 @@ function buildEditFieldKeyboard() {
 // STEP RENDER — savolni foydalanuvchiga yuborish
 // ---------------------------------------------------------------------
 
-async function renderStep(chatId, rowNum, stepKey, sessionData) {
+// Tahrirlash zanjiri paytida, quyidagi steplarga yetib kelinsa —
+// demak lokal filial (branch) tugagan, tasdiqlashga qaytiladi (bu
+// steplar qayta so'ralmaydi, chunki ular boshqa bo'limga tegishli).
+const EDIT_EXIT_KEYS = new Set([
+  'full_name_warning', // zagran_status filiali tugadi
+  'asosiy_maqsad',      // sertifikat filiali tugadi
+  'mother_status',      // otasi filiali tugadi
+  'address',             // onasi filiali tugadi
+  'preferred_region',    // bitiruvchi/GPA filiali tugadi
+]);
+
+// Ildiz-step tahrirlanganda, eski javobga tegishli ustunlarni
+// tozalash kerak (aks holda yangi yo'l ularga tegmasa, eski qiymat
+// qolib ketadi).
+const EDIT_ROOT_CLEAR_COLS = {
+  zagran_status: ['N'],
+  certificate_status: ['J', 'K', 'AC', 'AD'],
+  certificate_type: ['K', 'AC', 'AD'],
+  certificate_type_taker: ['K', 'AC', 'AD'],
+};
+
+async function renderStep(chatId, rowNum, stepKey, sessionData, isEditingChain) {
   const step = STUDENT_STEPS[stepKey];
 
   // 'skip' turdagi steplar avtomatik yoziladi, savol so'ralmaydi
   if (step.type === 'skip') {
     await writeStepValue(rowNum, step.sheetCol, step.autoValue);
     const nextKey = step.next(sessionData);
+    if (isEditingChain && EDIT_EXIT_KEYS.has(nextKey)) {
+      await writeCurrentStep(rowNum, 'confirm');
+      return renderStep(chatId, rowNum, 'confirm', {});
+    }
     await writeCurrentStep(rowNum, nextKey);
-    return renderStep(chatId, rowNum, nextKey, sessionData);
+    return renderStep(chatId, rowNum, nextKey, sessionData, isEditingChain);
   }
 
   // 'skip_multi' — bitta qiymatni bir nechta ustunga bir vaqtda yozadi
@@ -1073,8 +1114,12 @@ async function renderStep(chatId, rowNum, stepKey, sessionData) {
       await writeStepValue(rowNum, col, value);
     }
     const nextKey = step.next(sessionData);
+    if (isEditingChain && EDIT_EXIT_KEYS.has(nextKey)) {
+      await writeCurrentStep(rowNum, 'confirm');
+      return renderStep(chatId, rowNum, 'confirm', {});
+    }
     await writeCurrentStep(rowNum, nextKey);
-    return renderStep(chatId, rowNum, nextKey, sessionData);
+    return renderStep(chatId, rowNum, nextKey, sessionData, isEditingChain);
   }
 
   // 'branch_by_sheet' — savol so'ramasdan, Sheet'dagi boshqa ustun
@@ -1085,8 +1130,12 @@ async function renderStep(chatId, rowNum, stepKey, sessionData) {
     const rowData = await getRowData(rowNum);
     const checkValue = rowData[step.sheetColToCheck];
     const nextKey = checkValue === step.matchValue ? step.ifMatchNext : step.ifNoMatchNext;
+    if (isEditingChain && EDIT_EXIT_KEYS.has(nextKey)) {
+      await writeCurrentStep(rowNum, 'confirm');
+      return renderStep(chatId, rowNum, 'confirm', {});
+    }
     await writeCurrentStep(rowNum, nextKey);
-    return renderStep(chatId, rowNum, nextKey, sessionData);
+    return renderStep(chatId, rowNum, nextKey, sessionData, isEditingChain);
   }
 
   if (step.type === 'confirm_summary') {
@@ -1094,6 +1143,10 @@ async function renderStep(chatId, rowNum, stepKey, sessionData) {
     // Har bir maydon: tartib raqam + savol nomi + javob.
     // Bir xil ustunga yozadigan variantlar (masalan IELTS/TOPIK ball)
     // takrorlanmasligi uchun ustun bo'yicha filtrlanadi.
+    // K ustuni (sertifikat balli) uchun umumiy nom ishlatiladi —
+    // aks holda doim "IELTS ball" chiqib qolardi, hatto TOPIK/TOEFL/
+    // SKA bo'lsa ham.
+    const COLUMN_LABEL_OVERRIDE = { K: 'Sertifikat ball' };
     const seenCols = new Set();
     const lines = [];
     let n = 1;
@@ -1103,7 +1156,7 @@ async function renderStep(chatId, rowNum, stepKey, sessionData) {
       const val = String(rowData[s.sheetCol] || '').trim();
       if (!val) continue; // bo'sh maydonlar ko'rsatilmaydi
       seenCols.add(s.sheetCol);
-      const label = s.label || key;
+      const label = COLUMN_LABEL_OVERRIDE[s.sheetCol] || s.label || key;
       lines.push(`${n}. ${label}: ${val}`);
       n++;
     }
@@ -1175,16 +1228,32 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
     await writeStepValue(rowNum, step.sheetCol, trimmedValue);
   }
 
-  // Tahrirlash rejimida bo'lsa — javobni yozib, to'g'ridan-to'g'ri
-  // tasdiqlash sahifasiga qaytariladi (oddiy zanjirni davom ettirmaydi).
-  if (session.editing) {
-    session.editing = false;
-    await writeCurrentStep(rowNum, 'confirm');
-    return renderStep(chatId, rowNum, 'confirm', {});
-  }
-
   const sessionData = { [stepKey]: trimmedValue };
   const nextKey = step.next(sessionData);
+
+  // Tahrirlash rejimida bo'lsa: agar shu step biror filialning ILDIZI
+  // bo'lsa (masalan sertifikat holati), eski javobga tegishli ustunlar
+  // tozalanadi — aks holda yangi yo'l ularga tegmasa, eski qiymat
+  // Sheet'da qolib ketadi.
+  if (session.editing) {
+    const clearCols = EDIT_ROOT_CLEAR_COLS[stepKey];
+    if (clearCols) {
+      for (const col of clearCols) await writeStepValue(rowNum, col, '');
+    }
+
+    if (EDIT_EXIT_KEYS.has(nextKey)) {
+      // Lokal filial tugadi — tasdiqlash sahifasiga qaytamiz.
+      session.editing = false;
+      await writeCurrentStep(rowNum, 'confirm');
+      return renderStep(chatId, rowNum, 'confirm', {});
+    }
+
+    // Filial hali davom etmoqda — keyingi ICHKI savol so'raladi,
+    // "editing" holati saqlanib qoladi (butun filial tugagunicha).
+    await writeCurrentStep(rowNum, nextKey);
+    return renderStep(chatId, rowNum, nextKey, sessionData, true);
+  }
+
   await writeCurrentStep(rowNum, nextKey);
   await renderStep(chatId, rowNum, nextKey, sessionData);
 }
@@ -1193,25 +1262,94 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
 // WEBHOOK
 // ---------------------------------------------------------------------
 
+// =====================================================================
+// PARALEL ISH BAJARISH MUAMMOSINI OLDINI OLISH (root-cause fix)
+// Muammo: talaba tugmani tez-tez ikki marta bossa yoki tarmoq
+// sekinlashsa, Telegram bir xil yoki ketma-ket ikkita yangilanish
+// yuborishi mumkin. Bular deyarli bir vaqtda qayta ishlansa, ikkinchi
+// so'rov birinchisi hali Sheets'ga yozib ulgurmagan ESKI holatni
+// o'qiydi — natijada javoblar bir-birining ustiga yozilib, noto'g'ri
+// ustunga tushib qoladi (masalan yordam so'rovi shaklida guruhga
+// ketishi, yoki bir xil telefon raqami tekshiruvdan o'tib ketishi).
+//
+// Yechim ikki qatlamli:
+//  1) Telegram update_id bo'yicha DUBLIKATNI olib tashlash.
+//  2) Har bir chat_id uchun so'rovlarni KETMA-KET (bittadan) qayta
+//     ishlash — ikkinchi so'rov birinchisi tugagunicha kutadi.
+// =====================================================================
+
+const processedUpdateIds = new Set();
+const MAX_TRACKED_UPDATE_IDS = 5000;
+
+function isDuplicateUpdate(updateId) {
+  if (updateId === undefined || updateId === null) return false;
+  if (processedUpdateIds.has(updateId)) return true;
+  processedUpdateIds.add(updateId);
+  if (processedUpdateIds.size > MAX_TRACKED_UPDATE_IDS) {
+    // Eng eski yozuvlarni tozalash (Set — kiritish tartibida saqlaydi)
+    const it = processedUpdateIds.values();
+    for (let i = 0; i < 1000; i++) processedUpdateIds.delete(it.next().value);
+  }
+  return false;
+}
+
+// chatId -> oxirgi so'rovning Promise'i. Keyingi so'rov shu Promise
+// tugashini kutib, keyin boshlanadi.
+const chatQueues = new Map();
+
+function getUpdateChatId(body) {
+  if (body.callback_query) return body.callback_query.message.chat.id;
+  if (body.message) return body.message.chat.id;
+  return null;
+}
+
+async function enqueueForChat(chatId, task) {
+  const prev = chatQueues.get(chatId) || Promise.resolve();
+  const next = prev.then(task, task); // oldingi xato bo'lsa ham davom etamiz
+  // Xotira sizib chiqmasligi uchun, navbat bo'sh bo'lgach tozalaymiz
+  chatQueues.set(chatId, next.catch(() => {}));
+  return next;
+}
+
 app.post('/webhook', async (req, res) => {
   try {
-    if (req.body.callback_query) {
-      await handleCallback(req.body.callback_query);
-      return res.sendStatus(200);
+    // 1-qatlam: bir xil update_id qayta kelsa — e'tiborsiz qoldiramiz
+    if (isDuplicateUpdate(req.body.update_id)) {
+      return;
     }
 
-    const message = req.body.message;
-    if (!message || !message.chat) return res.sendStatus(200);
+    const chatId = getUpdateChatId(req.body);
+    if (chatId === null) return;
+
+    // 2-qatlam: shu chat uchun navbatga qo'yamiz — oldingi so'rov
+    // TUGAMAGUNCHA, keyingisi boshlanmaydi.
+    await enqueueForChat(chatId, () => processUpdate(req.body));
+    return;
+  } catch (err) {
+    console.error('Webhook tashqi xatosi:', err);
+    return;
+  }
+});
+
+async function processUpdate(body) {
+  try {
+    if (body.callback_query) {
+      await handleCallback(body.callback_query);
+      return;
+    }
+
+    const message = body.message;
+    if (!message || !message.chat) return;
 
     // --- Guruh xabarlari — butunlay boshqa oqim (hodim hujjat so'rovi) ---
     if (message.chat.type === 'group' || message.chat.type === 'supergroup') {
       await handleGroupMessage(message);
-      return res.sendStatus(200);
+      return;
     }
 
     // Guruhga a'zolik o'zgarishi, va boshqa shaxsiy bo'lmagan hodisalar
     // e'tiborsiz qoldiriladi.
-    if (!message.text && !message.document && !message.photo && !message.video) return res.sendStatus(200);
+    if (!message.text && !message.document && !message.photo && !message.video) return;
 
     const chatId = message.chat.id;
     let text = (message.text || '').trim();
@@ -1223,11 +1361,11 @@ app.post('/webhook', async (req, res) => {
     if (text === '/viza') {
       if (!isAdmin(chatId) && !isBoss(chatId)) {
         await sendMessage(chatId, 'Bu buyruq faqat administrator uchun.');
-        return res.sendStatus(200);
+        return;
       }
       userStates.set(chatId, { mode: 'admin_visa_awaiting_id' });
       await sendMessage(chatId, 'Qaysi talaba viza bosqichiga o\'tdi? Shartnoma raqamini kiriting:\n\n(Bir nechta talaba bo\'lsa, vergul bilan ajratib yozing)');
-      return res.sendStatus(200);
+      return;
     }
 
     // --- ADMIN: /qaytar — hujjatlardan birortasi to'g'ri bo'lmasa,
@@ -1236,18 +1374,18 @@ app.post('/webhook', async (req, res) => {
     if (text === '/qaytar') {
       if (!isAdmin(chatId) && !isBoss(chatId)) {
         await sendMessage(chatId, 'Bu buyruq faqat administrator uchun.');
-        return res.sendStatus(200);
+        return;
       }
       userStates.set(chatId, { mode: 'admin_return_awaiting_id' });
       await sendMessage(chatId, 'Qaysi talabaning hujjatlarini qaytarish kerak? Shartnoma raqamini kiriting:');
-      return res.sendStatus(200);
+      return;
     }
 
     // --- /xulosa: kunlik xulosani darhol ko'rish (sinov uchun ham) ---
     if (text === '/xulosa') {
       if (!isBoss(chatId) && !isAdmin(chatId)) {
         await sendMessage(chatId, 'Bu buyruq faqat rahbariyat uchun.');
-        return res.sendStatus(200);
+        return;
       }
       await sendMessage(chatId, 'Xulosa tayyorlanmoqda...');
       try {
@@ -1263,14 +1401,14 @@ app.post('/webhook', async (req, res) => {
         console.error('Xulosa xatosi:', e);
         await sendMessage(chatId, 'Xulosa tayyorlashda xatolik: ' + e.message);
       }
-      return res.sendStatus(200);
+      return;
     }
 
     // --- /hisobot: Boss uchun to'liq analitika (DB sahifasidan) ---
     if (text === '/hisobot') {
       if (!isBoss(chatId) && !isAdmin(chatId)) {
         await sendMessage(chatId, 'Bu buyruq faqat rahbariyat uchun.');
-        return res.sendStatus(200);
+        return;
       }
       await sendMessage(chatId, 'Hisobot tayyorlanmoqda, biroz kuting...');
       try {
@@ -1282,7 +1420,7 @@ app.post('/webhook', async (req, res) => {
         console.error('Hisobot xatosi:', e);
         await sendMessage(chatId, 'Hisobot tayyorlashda xatolik yuz berdi: ' + e.message);
       }
-      return res.sendStatus(200);
+      return;
     }
 
     // --- /yordam: talaba yordam so'raydi, supervisor guruhiga signal ---
@@ -1290,7 +1428,7 @@ app.post('/webhook', async (req, res) => {
       const s = userStates.get(chatId);
       userStates.set(chatId, { ...(s || {}), mode: 'awaiting_help_text', helpPrev: s ? s.mode : null });
       await sendMessage(chatId, 'Savolingizni yoki muammoingizni yozing — mas\'ul hodimimizga yetkazamiz:');
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Funksiya menyusi (rol asosida farqlanadi) ---
@@ -1304,17 +1442,17 @@ app.post('/webhook', async (req, res) => {
     if (text === '/namuna') {
       if (!canEditFaq(chatId)) {
         await sendMessage(chatId, 'Bu funksiya faqat supervisorlar uchun.');
-        return res.sendStatus(200);
+        return;
       }
       const rows = DOCUMENT_TYPES.map((d) => [{ text: d.label, callback_data: `smpl:${d.code}` }]);
       await sendMessage(chatId, 'Qaysi hujjat uchun namuna/talab sozlaysiz?', { inline_keyboard: rows });
-      return res.sendStatus(200);
+      return;
     }
 
     // --- /qollanma: funksiyalar bo'yicha yo'riqnoma ---
     if (text === '/qollanma' || text === '/yoriqnoma') {
       await sendMessage(chatId, guideForUser(chatId), keyboardForUser(chatId));
-      return res.sendStatus(200);
+      return;
     }
 
     if (text === '/menu') {
@@ -1325,7 +1463,7 @@ app.post('/webhook', async (req, res) => {
       if (isBoss(chatId)) label = 'Rahbariyat funksiyalari quyida:';
       else if (isAdmin(chatId)) label = 'Admin funksiyalari quyida:';
       await sendMessage(chatId, label, keyboardForUser(chatId));
-      return res.sendStatus(200);
+      return;
     }
 
     // --- /status: talabaning joriy bosqichi (DB!STATUS ustunidan) ---
@@ -1333,17 +1471,17 @@ app.post('/webhook', async (req, res) => {
       const s = userStates.get(chatId);
       if (!s || !s.row) {
         await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting (/start).');
-        return res.sendStatus(200);
+        return;
       }
       await sendStudentStatus(chatId, s.contractId, s.row);
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Admin ID olish uchun texnik buyruq (har doim ishlaydi,
     // sessiyadan qat'iy nazar) ---
     if (text === '/adminid') {
       await sendMessage(chatId, `Sizning chat_id: ${chatId}\nUsername: @${username}`);
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Video yuborilsa, uning file_id'sini qaytaradi (WELCOME_VIDEO_FILE_ID
@@ -1351,7 +1489,7 @@ app.post('/webhook', async (req, res) => {
     // ID Coolify environment variable'ga qo'yiladi) ---
     if (message.video) {
       await sendMessage(chatId, `Video file_id:\n${message.video.file_id}\n\nBuni WELCOME_VIDEO_FILE_ID environment variable sifatida saqlang.`);
-      return res.sendStatus(200);
+      return;
     }
 
     // --- /start: shartnoma ID so'raladi ---
@@ -1367,7 +1505,7 @@ app.post('/webhook', async (req, res) => {
         + 'Boshlash uchun biz bilan qilgan shartnoma raqamingizni kiriting.\n\n'
         + 'Botdan qanday foydalanishni bilish uchun 📖 Qo\'llanma tugmasini bosing.',
         keyboardForUser(chatId));
-      return res.sendStatus(200);
+      return;
     }
 
     // =================================================================
@@ -1384,7 +1522,7 @@ app.post('/webhook', async (req, res) => {
         await sendMessage(chatId,
           'Tugmalar yashirildi.\n\nQaytarish uchun /menu buyrug\'ini yuboring.',
           { remove_keyboard: true });
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.COMPLAINT) {
@@ -1394,43 +1532,53 @@ app.post('/webhook', async (req, res) => {
           'Bu bildiradigan bizning kompaniyamiz haqidagi har qanday o\'rinli e\'tiroz va '
           + 'shikoyatlarni albatta ko\'rib chiqamiz va qoniqarli hal qilishga harakat qilamiz!\n\n'
           + 'E\'tiroz yoki shikoyatingizni yozing:');
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.FAQ) {
         const faqs = await getFaqList();
         if (faqs.length === 0) {
           await sendMessage(chatId, 'Hozircha savol-javob ro\'yxati bo\'sh.', keyboardForUser(chatId));
-          return res.sendStatus(200);
+          return;
         }
         await sendMessage(chatId, 'Ko\'p so\'raladigan savollar — qiziqtirgan savolni tanlang:', buildFaqKeyboard(faqs));
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.BRANCHES) {
         const branches = await getBranches();
         if (branches.length === 0) {
           await sendMessage(chatId, 'Filiallar ro\'yxati hozircha kiritilmagan.', keyboardForUser(chatId));
-          return res.sendStatus(200);
+          return;
         }
         await sendMessage(chatId, 'Filiallarimiz — kerakli filialni tanlang:', buildBranchesKeyboard(branches));
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.CONTACTS) {
         const contacts = await getContacts();
         if (contacts.length === 0) {
           await sendMessage(chatId, 'Aloqa ma\'lumotlari hozircha kiritilmagan.', keyboardForUser(chatId));
-          return res.sendStatus(200);
+          return;
         }
         await sendMessage(chatId, 'Kimga bog\'lanmoqchisiz? Tanlang:', buildContactsKeyboard(contacts));
-        return res.sendStatus(200);
+        return;
+      }
+
+      if (text === BTN.ANNOUNCE) {
+        if (!canEditFaq(chatId)) {
+          await sendMessage(chatId, 'Bu funksiya faqat supervisorlar uchun.');
+          return;
+        }
+        userStates.set(chatId, { mode: 'announce_awaiting_text' });
+        await sendMessage(chatId, 'E\'lon matnini yozing:');
+        return;
       }
 
       if (text === BTN.FAQ_EDIT) {
         if (!canEditFaq(chatId)) {
           await sendMessage(chatId, 'Bu funksiya faqat supervisorlar uchun.');
-          return res.sendStatus(200);
+          return;
         }
         const faqs = await getFaqList();
         let listText = `FAQ ro'yxati (${faqs.length} ta savol):\n\n`;
@@ -1441,51 +1589,51 @@ app.post('/webhook', async (req, res) => {
             [{ text: '🗑 Savolni o\'chirish', callback_data: 'faqedit:del' }],
           ],
         });
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.GUIDE) {
         await sendMessage(chatId, guideForUser(chatId), keyboardForUser(chatId));
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.RESTART) {
         userStates.set(chatId, { mode: 'awaiting_id' });
         await sendMessage(chatId, 'Shartnoma raqamingizni kiriting:', keyboardForUser(chatId));
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.HELP) {
         userStates.set(chatId, { ...s, mode: 'awaiting_help_text', helpPrev: s.mode || null });
         await sendMessage(chatId, 'Savolingizni yoki muammoingizni yozing — mas\'ul hodimimizga yetkazamiz:');
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.DOCS) {
         if (!s.row) {
           await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting.', keyboardForUser(chatId));
-          return res.sendStatus(200);
+          return;
         }
         const rowData = await getRowData(s.row);
         const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
         await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.STATUS) {
         if (!s.contractId) {
           await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting.', keyboardForUser(chatId));
-          return res.sendStatus(200);
+          return;
         }
         await sendStudentStatus(chatId, s.contractId, s.row);
-        return res.sendStatus(200);
+        return;
       }
 
       // ---- Admin / Boss tugmalari ----
       if (text === BTN.REPORT || text === BTN.SUMMARY) {
         if (!isBoss(chatId) && !isAdmin(chatId)) {
           await sendMessage(chatId, 'Bu funksiya faqat rahbariyat uchun.');
-          return res.sendStatus(200);
+          return;
         }
         await sendMessage(chatId, 'Tayyorlanmoqda, biroz kuting...');
         try {
@@ -1501,37 +1649,37 @@ app.post('/webhook', async (req, res) => {
           console.error('Hisobot/xulosa xatosi:', e);
           await sendMessage(chatId, 'Xatolik: ' + e.message);
         }
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.RETURN_DOC) {
         if (!isAdmin(chatId) && !isBoss(chatId)) {
           await sendMessage(chatId, 'Bu funksiya faqat administrator uchun.');
-          return res.sendStatus(200);
+          return;
         }
         userStates.set(chatId, { mode: 'admin_return_awaiting_id' });
         await sendMessage(chatId, 'Qaysi talabaning hujjatlarini qaytarish kerak? Shartnoma raqamini kiriting:');
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.GET_DOCS) {
         if (!isAdmin(chatId) && !isBoss(chatId)) {
           await sendMessage(chatId, 'Bu funksiya faqat rahbariyat uchun.');
-          return res.sendStatus(200);
+          return;
         }
         userStates.set(chatId, { mode: 'admin_get_docs_awaiting_id' });
         await sendMessage(chatId, 'Qaysi talabaning hujjatlari kerak? Shartnoma raqamini kiriting:');
-        return res.sendStatus(200);
+        return;
       }
 
       if (text === BTN.VISA) {
         if (!isAdmin(chatId) && !isBoss(chatId)) {
           await sendMessage(chatId, 'Bu funksiya faqat administrator uchun.');
-          return res.sendStatus(200);
+          return;
         }
         userStates.set(chatId, { mode: 'admin_visa_awaiting_id' });
         await sendMessage(chatId, 'Qaysi talaba viza bosqichiga o\'tdi? Shartnoma raqamini kiriting:\n\n(Bir nechta bo\'lsa, vergul bilan ajrating)');
-        return res.sendStatus(200);
+        return;
       }
     }
 
@@ -1567,14 +1715,14 @@ app.post('/webhook', async (req, res) => {
       // Oldingi rejimga qaytarish (forma davom etsin)
       userStates.set(chatId, { ...session, mode: session.helpPrev || 'in_form' });
       await sendMessage(chatId, 'Savolingiz mas\'ul hodimimizga yuborildi. Tez orada siz bilan bog\'lanishadi.');
-      return res.sendStatus(200);
+      return;
     }
 
     // --- FAQ tahrirlash oqimi (supervisor) ---
     if (session && session.mode === 'faq_add_question') {
       userStates.set(chatId, { ...session, mode: 'faq_add_answer', pendingQuestion: text });
       await sendMessage(chatId, 'Endi shu savolga JAVOBNI yozing:');
-      return res.sendStatus(200);
+      return;
     }
     if (session && session.mode === 'faq_add_answer') {
       try {
@@ -1589,14 +1737,14 @@ app.post('/webhook', async (req, res) => {
         console.error('FAQ qo\'shish xatosi:', e);
         await sendMessage(chatId, 'Saqlashda xatolik: ' + e.message);
       }
-      return res.sendStatus(200);
+      return;
     }
     if (session && session.mode === 'faq_delete_number') {
       const idx = parseInt(text.trim(), 10);
       const faqs = await getFaqList();
       if (isNaN(idx) || idx < 1 || idx > faqs.length) {
         await sendMessage(chatId, `Noto'g'ri raqam. 1 dan ${faqs.length} gacha son kiriting.`);
-        return res.sendStatus(200);
+        return;
       }
       try {
         const target = faqs[idx - 1];
@@ -1611,7 +1759,7 @@ app.post('/webhook', async (req, res) => {
         console.error('FAQ o\'chirish xatosi:', e);
         await sendMessage(chatId, 'O\'chirishda xatolik: ' + e.message);
       }
-      return res.sendStatus(200);
+      return;
     }
 
     // --- E'tiroz va shikoyat matni kutilmoqda ---
@@ -1670,7 +1818,55 @@ app.post('/webhook', async (req, res) => {
       await sendMessage(chatId,
         'Murojaatingiz qabul qilindi. Rahbariyatimizga yetkazildi — albatta ko\'rib chiqamiz.',
         keyboardForUser(chatId));
-      return res.sendStatus(200);
+      return;
+    }
+
+    // --- E'lon: matn kutilmoqda ---
+    if (session && session.mode === 'announce_awaiting_text') {
+      session.announceText = text;
+      session.mode = 'announce_awaiting_targets';
+      userStates.set(chatId, session);
+      await sendMessage(chatId,
+        'Kimlarga yuborilsin?\n\n'
+        + 'Barchaga yuborish uchun "ALL" deb yozing.\n'
+        + 'Muayyan talabalarga yuborish uchun shartnoma ID\'larini vergul bilan ajratib yozing.\n\n'
+        + 'Misol: 2609-M0001, 2609-M0002');
+      return;
+    }
+
+    // --- E'lon: qabul qiluvchilar kutilmoqda ---
+    if (session && session.mode === 'announce_awaiting_targets') {
+      const targetText = text.trim();
+      userStates.set(chatId, { ...session, mode: null });
+      await sendMessage(chatId, 'E\'lon yuborilmoqda...');
+
+      try {
+        let chatIds = [];
+        if (targetText.toUpperCase() === 'ALL') {
+          const rows = await readSheetRange(`${DB_SHEET}!A2:AR3000`) || [];
+          chatIds = rows
+            .filter((r) => r && String(r[DB_COL.CHAT_ID] || '').trim())
+            .map((r) => String(r[DB_COL.CHAT_ID]).trim());
+        } else {
+          const ids = targetText.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+          for (const id of ids) {
+            const cid = await findStudentChatId(id);
+            if (cid) chatIds.push(cid);
+          }
+        }
+
+        chatIds = Array.from(new Set(chatIds)); // takrorlanmasin
+        let sent = 0;
+        for (const cid of chatIds) {
+          await sendMessage(cid, `📢 E'LON\n\n${session.announceText}`);
+          sent++;
+        }
+        await sendMessage(chatId, `E'lon ${sent} ta talabaga yuborildi.`, keyboardForUser(chatId));
+      } catch (e) {
+        console.error('E\'lon yuborishda xato:', e);
+        await sendMessage(chatId, 'Xatolik: ' + e.message);
+      }
+      return;
     }
 
     // --- Namuna sozlash: talab matni kutilmoqda ---
@@ -1682,7 +1878,7 @@ app.post('/webhook', async (req, res) => {
         'Talablar saqlandi.\n\nEndi NAMUNA rasmini yuboring (talaba shu rasmni ko\'radi), '
         + 'yoki rasmsiz saqlash uchun tugmani bosing.',
         { inline_keyboard: [[{ text: 'Rasmsiz saqlash ➡️', callback_data: 'smplsave:nofile' }]] });
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Namuna sozlash: rasm kutilmoqda ---
@@ -1691,7 +1887,7 @@ app.post('/webhook', async (req, res) => {
       if (message.document) { fid = message.document.file_id; ftype = 'document'; }
       else { fid = message.photo[message.photo.length - 1].file_id; ftype = 'photo'; }
       await saveDocSample(chatId, session, fid, ftype);
-      return res.sendStatus(200);
+      return;
     }
 
     // --- ADMIN: hujjat qaytarish sababi kutilmoqda ---
@@ -1704,7 +1900,7 @@ app.post('/webhook', async (req, res) => {
         + '(talabaga to\'g\'ri ko\'rinishni ko\'rsatish uchun), yoki namunasiz '
         + 'yuborish uchun "Namunasiz yuborish" tugmasini bosing.',
         { inline_keyboard: [[{ text: 'Namunasiz yuborish ➡️', callback_data: 'adret:nosample' }]] });
-      return res.sendStatus(200);
+      return;
     }
 
     // --- ADMIN: qaytarish uchun namuna rasm kutilmoqda ---
@@ -1714,7 +1910,7 @@ app.post('/webhook', async (req, res) => {
       if (message.document) { fid = message.document.file_id; ftype = 'document'; }
       else { fid = message.photo[message.photo.length - 1].file_id; ftype = 'photo'; }
       await finalizeDocReturn(chatId, session, fid, ftype);
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Admin oqimi: viza bosqichi uchun shartnoma ID(lar) kutilmoqda ---
@@ -1748,7 +1944,7 @@ app.post('/webhook', async (req, res) => {
       }
 
       await sendMessage(chatId, 'Natija:\n\n' + results.join('\n'));
-      return res.sendStatus(200);
+      return;
     }
 
     if (session && session.mode === 'admin_get_docs_awaiting_id') {
@@ -1756,30 +1952,30 @@ app.post('/webhook', async (req, res) => {
       userStates.delete(chatId);
       if (docs.length === 0) {
         await sendMessage(chatId, `Shartnoma ${text.toUpperCase()} uchun hech qanday hujjat topilmadi.`);
-        return res.sendStatus(200);
+        return;
       }
       const normalizedId = text.trim().toUpperCase();
       await sendMessage(chatId, `${docs.length} ta hujjat topildi, yuborilmoqda...`);
       for (const doc of docs) {
         await sendFileTo(chatId, null, doc.fileType, doc.fileId, `${normalizedId}_${doc.docCode}`);
       }
-      return res.sendStatus(200);
+      return;
     }
 
     if (session && session.mode === 'admin_return_awaiting_id') {
       const rowNum = await findRowByContractId(text);
       if (!rowNum) {
         await sendMessage(chatId, 'Bunday shartnoma topilmadi. Qayta kiriting.');
-        return res.sendStatus(200);
+        return;
       }
       userStates.set(chatId, { mode: 'admin_return_selecting_docs', row: rowNum, contractId: text.trim().toUpperCase(), selectedCodes: [] });
       await sendMessage(chatId, 'Qaysi hujjat(lar) qayta so\'ralsin? Tanlang (bir nechtasini belgilash mumkin):', buildAdminDocSelectKeyboard([]));
-      return res.sendStatus(200);
+      return;
     }
 
     if (!session) {
       await sendMessage(chatId, 'Sessiya topilmadi. Iltimos /start bosing.');
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Shartnoma ID tekshiruvi + XAVFSIZLIK NAZORATI ---
@@ -1787,7 +1983,7 @@ app.post('/webhook', async (req, res) => {
       const rowNum = await findRowByContractId(text);
       if (!rowNum) {
         await sendMessage(chatId, 'Bunday shartnoma raqami topilmadi. Qayta kiriting yoki administratorga murojaat qiling.');
-        return res.sendStatus(200);
+        return;
       }
       const rowData = await getRowData(rowNum);
 
@@ -1805,7 +2001,7 @@ app.post('/webhook', async (req, res) => {
           pendingUsername: username,
         });
         await sendMessage(chatId, 'Xavfsizlik uchun, ushbu shartnomada ro\'yxatdan o\'tgan telefon raqamining OXIRGI 4 ta raqamini kiriting:');
-        return res.sendStatus(200);
+        return;
       }
 
       if (!rowData.U && username) {
@@ -1825,7 +2021,7 @@ app.post('/webhook', async (req, res) => {
 
       await sendMessage(chatId, 'Shartnoma tasdiqlandi. Ma\'lumot kiritishni boshlaymiz.', keyboardForUser(chatId));
       await renderStep(chatId, rowNum, stepKey, {});
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Telefon raqami oxirgi 4 raqami orqali tasdiqlash ---
@@ -1838,7 +2034,7 @@ app.post('/webhook', async (req, res) => {
       if (!storedPhone || enteredLast4.length !== 4 || enteredLast4 !== storedLast4) {
         await sendMessage(chatId, 'Ma\'lumotlar mos kelmadi. Bu shartnoma raqami sizga tegishli emas yoki xato kiritildi. Administratorga murojaat qiling.');
         userStates.delete(chatId);
-        return res.sendStatus(200);
+        return;
       }
 
       // Tasdiqlandi — username yangilanadi (masalan talaba yangi
@@ -1849,7 +2045,7 @@ app.post('/webhook', async (req, res) => {
       userStates.set(chatId, { mode: 'in_form', row: session.row, contractId: session.contractId, editing: false });
       await sendMessage(chatId, 'Tasdiqlandi. Davom etamiz.');
       await renderStep(chatId, session.row, stepKey, {});
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Hujjatlar buyrug'i ---
@@ -1857,7 +2053,7 @@ app.post('/webhook', async (req, res) => {
       const rowData = await getRowData(session.row);
       const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
       await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Fayl yuborilganda (hujjat rejimida) ---
@@ -1879,7 +2075,7 @@ app.post('/webhook', async (req, res) => {
       if (!forwardResult || !forwardResult.ok) {
         console.error(`Hujjat forward xatosi (${docCode}, shartnoma ${contractId}):`, forwardResult);
         await sendMessage(chatId, 'Kechirasiz, hujjatni yuborishda texnik xatolik yuz berdi. Iltimos, qayta urinib ko\'ring yoki administratorga murojaat qiling.');
-        return res.sendStatus(200);
+        return;
       }
 
       // Sheets amallarini alohida try/catch ichida bajaramiz — bu yerda
@@ -1900,7 +2096,7 @@ app.post('/webhook', async (req, res) => {
             await sendMessage(chatId, `Qabul qilindi (${session.multiCount}/${MULTI_UPLOAD_MAX}). Yana fayl yuborasizmi?`,
               buildMoreFilesKeyboard(docCode));
           }
-          return res.sendStatus(200);
+          return;
         }
 
         // PARENT_INCOME ichidagi hujjatlar — ro'yxatda 'PARENT_INCOME'
@@ -1932,7 +2128,7 @@ app.post('/webhook', async (req, res) => {
           'Hujjatlar holatini ko\'rish uchun /hujjatlar buyrug\'ini yuboring.');
       }
 
-      return res.sendStatus(200);
+      return;
     }
 
     // --- Oddiy matn javobi (forma bosqichida) ---
@@ -1949,15 +2145,15 @@ app.post('/webhook', async (req, res) => {
       } else {
         await sendMessage(chatId, 'Iltimos, tugmalardan birini tanlang.');
       }
-      return res.sendStatus(200);
+      return;
     }
 
-    return res.sendStatus(200);
+    return;
   } catch (err) {
-    console.error('Webhook xatosi:', err);
-    return res.sendStatus(200);
+    console.error('processUpdate xatosi:', err);
   }
-});
+}
+
 
 /**
  * DOC_SAMPLES sahifasiga hujjat talablari va namunasini saqlaydi.
@@ -2595,6 +2791,54 @@ const PAYMENT_MESSAGES = {
 
 let paymentTickRunning = false;
 
+// =====================================================================
+// STATUS O'ZGARISHI KUZATUVI — DB!D (STATUS) ustuni hodim tomonidan
+// qo'lda o'zgartirilganda, bot buni avtomatik payqab, talabaga
+// STATUS_MESSAGES'dagi mos matnni yuboradi. Har 5 daqiqada tekshiradi.
+// DB!AS (LAST_NOTIFIED_STATUS) orqali qayta xabar yubormaslik
+// ta'minlanadi.
+// =====================================================================
+
+let statusWatchTickRunning = false;
+
+async function runStatusWatchTick() {
+  if (statusWatchTickRunning) return;
+  statusWatchTickRunning = true;
+  try {
+    const rows = await readSheetRange(`${DB_SHEET}!A2:AS3000`);
+    if (!rows) return;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row) continue;
+      const rowNum = i + 2;
+      const contractId = String(row[DB_COL.ID] || '').trim();
+      const status = String(row[DB_COL.STATUS] || '').trim();
+      const chatId = String(row[DB_COL.CHAT_ID] || '').trim();
+      const lastNotified = String(row[DB_COL.LAST_NOTIFIED_STATUS] || '').trim();
+
+      if (!contractId || !status || !chatId) continue;
+      if (status === lastNotified) continue; // o'zgarish yo'q
+
+      const msg = STATUS_MESSAGES[status.toUpperCase()];
+      // Har doim "oxirgi xabar berilgan holat"ni yangilaymiz — hatto
+      // matn topilmasa ham (aks holda notanish STATUS qiymatida
+      // botunutmasdan qayta-qayta tekshirib turadi va hech narsa
+      // yubormaydi, lekin loop shart emas).
+      await updateCell(`${DB_SHEET}!AS${rowNum}`, status);
+
+      if (msg) {
+        await sendMessage(chatId, `📢 Holatingiz yangilandi:\n\n${msg}`);
+        console.log(`Status xabari yuborildi: ${contractId} -> ${status}`);
+      }
+    }
+  } catch (err) {
+    console.error('Status kuzatuv xatosi:', err);
+  } finally {
+    statusWatchTickRunning = false;
+  }
+}
+
 async function runPaymentReminderTick() {
   if (paymentTickRunning) return;
   paymentTickRunning = true;
@@ -2835,5 +3079,6 @@ app.listen(PORT, () => {
   registerDefaultCommands().catch((e) => console.error('setMyCommands xatosi:', e));
   setInterval(runDocumentReminderTick, 5 * 60 * 1000);
   setInterval(runPaymentReminderTick, 5 * 60 * 1000);
+  setInterval(runStatusWatchTick, 5 * 60 * 1000);
   setInterval(runDailySummaryTick, 5 * 60 * 1000);
 });
