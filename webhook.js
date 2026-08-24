@@ -1077,7 +1077,9 @@ const EDIT_EXIT_KEYS = new Set([
   'asosiy_maqsad',      // sertifikat filiali tugadi
   'mother_status',      // otasi filiali tugadi
   'address',             // onasi filiali tugadi
-  'preferred_region',    // bitiruvchi/GPA filiali tugadi
+  'preferred_region',    // bitiruvchi/GPA filiali tugadi (Master emas)
+  'master_major_gate',   // bitiruvchi/GPA filiali tugadi (Master gate)
+  'school_name',         // viza rad tarixi filiali tugadi
 ]);
 
 // Ildiz-step tahrirlanganda, eski javobga tegishli ustunlarni
@@ -1088,6 +1090,7 @@ const EDIT_ROOT_CLEAR_COLS = {
   certificate_status: ['J', 'K', 'AC', 'AD'],
   certificate_type: ['K', 'AC', 'AD'],
   certificate_type_taker: ['K', 'AC', 'AD'],
+  rejection_history: ['AE'],
 };
 
 async function renderStep(chatId, rowNum, stepKey, sessionData, isEditingChain) {
@@ -1343,24 +1346,28 @@ async function enqueueForChat(chatId, task) {
   return next;
 }
 
-app.post('/webhook', async (req, res) => {
-  try {
-    // 1-qatlam: bir xil update_id qayta kelsa — e'tiborsiz qoldiramiz
-    if (isDuplicateUpdate(req.body.update_id)) {
-      return;
+app.post('/webhook', (req, res) => {
+  // MUHIM: Telegram'ga DARHOL javob beramiz (200 OK), keyin qayta
+  // ishlashni fonda davom ettiramiz. Bu tuzatishdan oldin javob
+  // umuman yuborilmasdi — Telegram timeout kutib, xabarni QAYTA
+  // jo'natishi mumkin edi (dublikat ishlov berish xavfi).
+  res.sendStatus(200);
+
+  (async () => {
+    try {
+      // 1-qatlam: bir xil update_id qayta kelsa — e'tiborsiz qoldiramiz
+      if (isDuplicateUpdate(req.body.update_id)) return;
+
+      const chatId = getUpdateChatId(req.body);
+      if (chatId === null) return;
+
+      // 2-qatlam: shu chat uchun navbatga qo'yamiz — oldingi so'rov
+      // TUGAMAGUNCHA, keyingisi boshlanmaydi.
+      await enqueueForChat(chatId, () => processUpdate(req.body));
+    } catch (err) {
+      console.error('Webhook tashqi xatosi:', err);
     }
-
-    const chatId = getUpdateChatId(req.body);
-    if (chatId === null) return;
-
-    // 2-qatlam: shu chat uchun navbatga qo'yamiz — oldingi so'rov
-    // TUGAMAGUNCHA, keyingisi boshlanmaydi.
-    await enqueueForChat(chatId, () => processUpdate(req.body));
-    return;
-  } catch (err) {
-    console.error('Webhook tashqi xatosi:', err);
-    return;
-  }
+  })();
 });
 
 async function processUpdate(body) {
