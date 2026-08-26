@@ -501,15 +501,47 @@ async function buildBossReport() {
  * DB sahifasidan shartnoma ID bo'yicha qatorni topadi.
  * @returns {Array|null} qator massivi yoki null
  */
-async function findDbRowByContractId(contractId) {
-  const rows = await readSheetRange(`${DB_SHEET}!A2:AR3000`);
-  if (!rows) return null;
-  const normalized = String(contractId).trim().toUpperCase();
-  for (const row of rows) {
-    if (!row) continue;
-    if (String(row[DB_COL.ID] || '').trim().toUpperCase() === normalized) return row;
+// DB ID ustuni keshi — /status har safar 3000 qatorni to'liq
+// yuklamasligi uchun. Faqat ID ustuni (bitta ustun) keshlanadi,
+// keyin kerakli QATORgina alohida so'rov bilan olinadi.
+// Bu javob vaqtini sezilarli qisqartiradi.
+let dbIdIndexCache = null;      // { 'ID': rowNumber }
+let dbIdIndexCacheAt = 0;
+const DB_ID_CACHE_TTL = 3 * 60 * 1000; // 3 daqiqa
+
+async function getDbIdIndex() {
+  const now = Date.now();
+  if (dbIdIndexCache && (now - dbIdIndexCacheAt) < DB_ID_CACHE_TTL) {
+    return dbIdIndexCache;
   }
-  return null;
+  // Faqat F ustuni (ID) — 44 ta ustun o'rniga bittasi
+  const col = await readSheetRange(`${DB_SHEET}!F2:F3000`) || [];
+  const index = {};
+  for (let i = 0; i < col.length; i++) {
+    const v = col[i] && col[i][0] ? String(col[i][0]).trim().toUpperCase() : '';
+    if (v) index[v] = i + 2; // haqiqiy Sheet qator raqami
+  }
+  dbIdIndexCache = index;
+  dbIdIndexCacheAt = now;
+  return index;
+}
+
+async function findDbRowByContractId(contractId) {
+  const normalized = String(contractId).trim().toUpperCase();
+  const index = await getDbIdIndex();
+  const rowNum = index[normalized];
+  if (!rowNum) {
+    // Kesh eskirgan bo'lishi mumkin (yangi talaba qo'shilgan) —
+    // bir marta majburan yangilab, qayta tekshiramiz
+    dbIdIndexCache = null;
+    const fresh = await getDbIdIndex();
+    const r2 = fresh[normalized];
+    if (!r2) return null;
+    const res2 = await readSheetRange(`${DB_SHEET}!A${r2}:AR${r2}`);
+    return (res2 && res2[0]) || null;
+  }
+  const res = await readSheetRange(`${DB_SHEET}!A${rowNum}:AR${rowNum}`);
+  return (res && res[0]) || null;
 }
 
 /**
@@ -773,6 +805,23 @@ async function registerDefaultCommands() {
     scope: { type: 'default' },
   });
   console.log('setMyCommands (default):', r && r.ok ? 'OK' : JSON.stringify(r));
+
+  // Guruhlar uchun alohida ro'yxat — u yerda faqat guruhda
+  // haqiqatan ishlaydigan buyruqlar ko'rsatiladi.
+  const GROUP_COMMANDS = [
+    { command: 'hujjat', description: 'Talaba hujjatlarini so\'rash' },
+    { command: 'savollar', description: 'Ko\'p so\'raladigan savollar' },
+    { command: 'filiallar', description: 'Filiallarimiz manzillari' },
+    { command: 'aloqa', description: 'Hodimlar telefon raqamlari' },
+    { command: 'hisobot', description: 'To\'liq hisobot (hodimlar uchun)' },
+    { command: 'xulosa', description: 'Kunlik xulosa (hodimlar uchun)' },
+    { command: 'menu', description: 'Guruh funksiyalari' },
+  ];
+  const g = await telegramApi('setMyCommands', {
+    commands: GROUP_COMMANDS,
+    scope: { type: 'all_group_chats' },
+  });
+  console.log('setMyCommands (groups):', g && g.ok ? 'OK' : JSON.stringify(g));
 }
 
 /** Admin/Boss uchun shaxsiy chatda kengaytirilgan ro'yxat */
@@ -1012,15 +1061,6 @@ async function sendDocRequirements(chatId, docCode) {
 
 
 
-function buildStudentMenuKeyboard() {  return {
-    inline_keyboard: [
-      [{ text: '🆕 Boshlash / shartnoma ID', callback_data: 'menu:start' }],
-      [{ text: '📄 Hujjatlar holati', callback_data: 'menu:docs' }],
-      [{ text: '📊 Mening holatim', callback_data: 'menu:status' }],
-      [{ text: '🆘 Yordam kerak', callback_data: 'menu:yordam' }],
-    ],
-  };
-}
 
 function buildAdminMenuKeyboard() {
   return {
@@ -1724,6 +1764,7 @@ async function processUpdate(body) {
       }
     }
 
+
     // --- Yordam matni kutilmoqda ---
     const session = userStates.get(chatId);
     if (session && session.mode === 'awaiting_help_text') {
@@ -2294,17 +2335,23 @@ async function finalizeDocReturn(adminChatId, session, sampleFileId, sampleFileT
 
 async function handleGroupMessage(message) {
   const chatId = message.chat.id;
-  const text = (message.text || '').trim();
+  const rawText = (message.text || '').trim();
   const threadId = message.message_thread_id;
+  const userId = message.from ? message.from.id : null;
+  const username = message.from ? (message.from.username || '') : '';
 
-  if (text === '/menu' || text.startsWith('/menu@')) {
+  // Guruhda buyruq "@bot_nomi" bilan kelishi mumkin — uni ajratamiz
+  const text = rawText.split('@')[0].trim();
+
+  // ---- Hujjat so'rash (guruhga xos, reply asosida) ----
+  if (text === '/menu') {
     await sendMessage(chatId, 'Hodimlar uchun funksiyalar:', {
       inline_keyboard: [[{ text: '📄 Hujjat so\'rash', callback_data: 'groupmenu:hujjat' }]],
     }, threadId);
     return;
   }
 
-  if (text === '/hujjat' || text.startsWith('/hujjat@')) {
+  if (text === '/hujjat') {
     const result = await sendMessage(chatId, 'Qaysi talabaning hujjatlari kerak? Shartnoma raqamini SHU XABARGA REPLY qilib yozing.', null, threadId);
     if (result && result.result && result.result.message_id) {
       pendingGroupRequests.set(result.result.message_id, { chatId, threadId });
@@ -2332,6 +2379,86 @@ async function handleGroupMessage(message) {
     return;
   }
 
+  // ---- Umumiy (hammaga ochiq) ma'lumot buyruqlari ----
+  // Guruhda ham ishlaydi, javob shu topic'ga qaytadi.
+  if (text === '/savollar' || text === '/faq') {
+    const faqs = await getFaqList();
+    if (faqs.length === 0) {
+      await sendMessage(chatId, 'Hozircha savol-javob ro\'yxati bo\'sh.', null, threadId);
+      return;
+    }
+    await sendMessage(chatId, 'Ko\'p so\'raladigan savollar:', buildFaqKeyboard(faqs), threadId);
+    return;
+  }
+
+  if (text === '/filiallar') {
+    const branches = await getBranches();
+    if (branches.length === 0) {
+      await sendMessage(chatId, 'Filiallar ro\'yxati kiritilmagan.', null, threadId);
+      return;
+    }
+    await sendMessage(chatId, 'Filiallarimiz:', buildBranchesKeyboard(branches), threadId);
+    return;
+  }
+
+  if (text === '/aloqa') {
+    const contacts = await getContacts();
+    if (contacts.length === 0) {
+      await sendMessage(chatId, 'Aloqa ma\'lumotlari kiritilmagan.', null, threadId);
+      return;
+    }
+    await sendMessage(chatId, 'Kimga bog\'lanmoqchisiz?', buildContactsKeyboard(contacts), threadId);
+    return;
+  }
+
+  // ---- Ruxsat talab qiladigan buyruqlar ----
+  // MUHIM: guruhda chat_id — GURUHNIKI, shuning uchun ruxsat
+  // xabar YUBORUVCHIning shaxsiy ID'si (message.from.id) bo'yicha
+  // tekshiriladi. Avval bu qilinmagani sabab guruhda hech bir
+  // buyruq ishlamas edi.
+  const senderIsStaff = userId && (isAdmin(userId) || isBoss(userId) || isSupervisor(userId));
+
+  const STAFF_COMMANDS = ['/hisobot', '/xulosa', '/qaytar', '/viza', '/namuna', '/elon'];
+  if (STAFF_COMMANDS.includes(text)) {
+    if (!senderIsStaff) {
+      await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.', null, threadId);
+      return;
+    }
+
+    // Hisobot va xulosa — natijani GURUHGA yuboramiz
+    if (text === '/hisobot') {
+      await sendMessage(chatId, 'Hisobot tayyorlanmoqda...', null, threadId);
+      try {
+        const parts = await buildBossReport();
+        for (const p of parts) await sendMessage(chatId, p, null, threadId);
+      } catch (e) {
+        await sendMessage(chatId, 'Xatolik: ' + e.message, null, threadId);
+      }
+      return;
+    }
+
+    if (text === '/xulosa') {
+      await sendMessage(chatId, 'Xulosa tayyorlanmoqda...', null, threadId);
+      try {
+        const sum = await buildDailySummary();
+        if (sum.length <= 4000) await sendMessage(chatId, sum, null, threadId);
+        else for (let i = 0; i < sum.length; i += 4000) await sendMessage(chatId, sum.slice(i, i + 4000), null, threadId);
+      } catch (e) {
+        await sendMessage(chatId, 'Xatolik: ' + e.message, null, threadId);
+      }
+      return;
+    }
+
+    // Ko'p bosqichli buyruqlar (qaytar/viza/namuna/elon) guruhda emas,
+    // SHAXSIY chatda bajariladi — chunki ular sessiya talab qiladi va
+    // guruhda bir nechta hodim bir vaqtda ishlatsa chalkashadi.
+    await sendMessage(chatId,
+      `@${username || 'hodim'}, bu buyruq shaxsiy chatda bajariladi.\n\n`
+      + 'Botga shaxsiy yozing va o\'sha yerda tugmalardan foydalaning.',
+      null, threadId);
+    return;
+  }
+
   // Boshqa guruh xabarlari — javob berilmaydi (spam qilmaslik uchun)
 }
 
@@ -2339,6 +2466,11 @@ async function handleCallback(callback) {
   const chatId = callback.message.chat.id;
   const data = callback.data;
   const callbackId = callback.id;
+  // Guruhda chat_id guruhniki bo'ladi — ruxsatni TUGMANI BOSGAN
+  // odamning shaxsiy ID'si bo'yicha tekshiramiz.
+  const actorId = callback.from ? callback.from.id : chatId;
+  const isGroupChat = callback.message.chat.type === 'group' || callback.message.chat.type === 'supergroup';
+  const threadId = callback.message.message_thread_id;
 
   // --- FAQ: savol tanlandi ---
   if (data.startsWith('faq:')) {
@@ -2350,13 +2482,14 @@ async function handleCallback(callback) {
       await sendMessage(chatId, 'Savol topilmadi.');
       return;
     }
-    await sendMessage(chatId, `❓ ${f.question}\n\n${f.answer || '(javob hali kiritilmagan)'}`);
+    await sendMessage(chatId, `❓ ${f.question}\n\n${f.answer || '(javob hali kiritilmagan)'}`, null, threadId);
     return;
   }
 
   // --- FAQ tahrirlash ---
   if (data === 'faqedit:add') {
-    if (!canEditFaq(chatId)) { answerCallbackQuery(callbackId, 'Ruxsat yo\'q.'); return; }
+    if (!canEditFaq(actorId)) { answerCallbackQuery(callbackId, 'Ruxsat yo\'q.'); return; }
+    if (isGroupChat) { answerCallbackQuery(callbackId, 'Bu amal shaxsiy chatda bajariladi.'); return; }
     const s = userStates.get(chatId) || {};
     userStates.set(chatId, { ...s, mode: 'faq_add_question' });
     answerCallbackQuery(callbackId, '');
@@ -2364,7 +2497,8 @@ async function handleCallback(callback) {
     return;
   }
   if (data === 'faqedit:del') {
-    if (!canEditFaq(chatId)) { answerCallbackQuery(callbackId, 'Ruxsat yo\'q.'); return; }
+    if (!canEditFaq(actorId)) { answerCallbackQuery(callbackId, 'Ruxsat yo\'q.'); return; }
+    if (isGroupChat) { answerCallbackQuery(callbackId, 'Bu amal shaxsiy chatda bajariladi.'); return; }
     const s = userStates.get(chatId) || {};
     userStates.set(chatId, { ...s, mode: 'faq_delete_number' });
     answerCallbackQuery(callbackId, '');
@@ -2378,8 +2512,8 @@ async function handleCallback(callback) {
     answerCallbackQuery(callbackId, '');
     const branches = await getBranches();
     const b = branches[idx];
-    if (!b) { await sendMessage(chatId, 'Filial topilmadi.'); return; }
-    await sendMessage(chatId, `📍 ${b.name}\n\n${b.address || 'Manzil kiritilmagan'}`);
+    if (!b) { await sendMessage(chatId, 'Filial topilmadi.', null, threadId); return; }
+    await sendMessage(chatId, `📍 ${b.name}\n\n${b.address || 'Manzil kiritilmagan'}`, null, threadId);
     if (!isNaN(b.lat) && !isNaN(b.lng)) {
       await sendLocation(chatId, b.lat, b.lng);
     }
@@ -2392,11 +2526,11 @@ async function handleCallback(callback) {
     answerCallbackQuery(callbackId, '');
     const contacts = await getContacts();
     const c = contacts[idx];
-    if (!c) { await sendMessage(chatId, 'Ma\'lumot topilmadi.'); return; }
+    if (!c) { await sendMessage(chatId, 'Ma\'lumot topilmadi.', null, threadId); return; }
     let t = `👤 ${c.name}`;
     if (c.role) t += `\n${c.role}`;
     t += `\n\n☎️ ${c.phone || 'raqam kiritilmagan'}`;
-    await sendMessage(chatId, t);
+    await sendMessage(chatId, t, null, threadId);
     return;
   }
 
@@ -2460,6 +2594,7 @@ async function handleCallback(callback) {
     await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
     return;
   }
+
   if (data === 'menu:yordam') {
     const s = userStates.get(chatId) || {};
     userStates.set(chatId, { ...s, mode: 'awaiting_help_text', helpPrev: s.mode || null });
