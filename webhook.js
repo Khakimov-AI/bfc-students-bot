@@ -1408,15 +1408,23 @@ function getUpdateChatId(body) {
 // Agar bitta so'rov shu vaqtdan uzoq davom etsa, navbat DAVOM ETADI
 // (keyingi so'rovlar kutib qolmaydi) — garchi eski so'rovning o'zi
 // fonda hali tugamagan bo'lsa ham.
-const CHAT_TASK_TIMEOUT_MS = 8000; // 8 soniya
+// MUHIM: Telegram'ga allaqachon darhol 200 OK javob berilgan (webhook
+// handlerida), shuning uchun bu yerda HTTP muhlati xavfi YO'Q — limitni
+// keng qo'yish xavfsiz. Oldin 8000ms edi, bu Sheets qayta-urinish
+// mexanizmi (429 xatosida 1s+2s+4s=7s gacha kutish) bilan birga ikkita
+// ketma-ket Sheets so'rovi bo'lganda (masalan hujjat so'ralganda:
+// getRowData + getDocSamples) osongina oshib ketardi — natijada
+// foydalanuvchi HECH QANDAY javob olmasdan qolardi.
+const CHAT_TASK_TIMEOUT_MS = 25000; // 25 soniya
 
-function withTimeout(promise, ms, label) {
+function withTimeout(promise, ms, label, onTimeout) {
   return new Promise((resolve) => {
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       console.error(`Navbat vaqti tugadi (${ms}ms): ${label} — keyingi so'rovga o'tildi.`);
+      if (onTimeout) { try { onTimeout(); } catch (e) { /* jim */ } }
       resolve();
     }, ms);
     promise.then(() => {
@@ -1436,10 +1444,13 @@ function withTimeout(promise, ms, label) {
 
 async function enqueueForChat(chatId, task) {
   const prev = chatQueues.get(chatId) || Promise.resolve();
-  const next = prev.then(
-    () => withTimeout(task(), CHAT_TASK_TIMEOUT_MS, `chat ${chatId}`),
-    () => withTimeout(task(), CHAT_TASK_TIMEOUT_MS, `chat ${chatId}`),
-  );
+  // Timeout ishga tushsa — foydalanuvchi JIM QOLMASIN, xabar beramiz.
+  const onTimeout = () => {
+    sendMessage(chatId, 'Kechirasiz, so\'rovingiz kutilganidan uzoq davom etdi. Iltimos, qayta urinib ko\'ring.')
+      .catch(() => {});
+  };
+  const runner = () => withTimeout(task(), CHAT_TASK_TIMEOUT_MS, `chat ${chatId}`, onTimeout);
+  const next = prev.then(runner, runner);
   // Xotira sizib chiqmasligi uchun, navbat bo'sh bo'lgach tozalaymiz
   chatQueues.set(chatId, next.catch(() => {}));
   return next;
@@ -2317,7 +2328,20 @@ async function processUpdate(body) {
 
     return;
   } catch (err) {
-    console.error('processUpdate xatosi:', err);
+    console.error('processUpdate xatosi:', err && err.stack ? err.stack : err);
+    // MUHIM: xato yashirilmaydi — talabaga ko'rinadigan javob beriladi,
+    // aks holda u botni "javob bermayapti" deb his qiladi.
+    try {
+      const cid = body.message && body.message.chat && body.message.chat.id;
+      if (cid) {
+        await sendMessage(cid, 'Kechirasiz, texnik xatolik yuz berdi. Iltimos, qayta urinib ko\'ring yoki /yordam orqali murojaat qiling.');
+      }
+    } catch (e2) { /* jim */ }
+    if (ADMIN_NOTIFY_CHAT_ID) {
+      try {
+        await sendMessage(ADMIN_NOTIFY_CHAT_ID, `⚠️ BOT XATOSI (message)\n\n${(err && err.message) || err}`);
+      } catch (e3) { /* jim */ }
+    }
   }
 }
 
@@ -2595,6 +2619,28 @@ async function getOrRestoreSession(chatId) {
 }
 
 async function handleCallback(callback) {
+  const chatId0 = callback.message.chat.id;
+  try {
+    await handleCallbackInner(callback);
+  } catch (err) {
+    // MUHIM: bu tuzatishdan oldin, ichkarida chiqqan har qanday xato
+    // faqat server logiga yozilib, talabaga HECH NARSA ko'rsatilmasdi —
+    // u "hech qanday reaksiya yo'q" deb his qilardi. Endi xato ko'rinadi
+    // va aniq matni menga (adminga) ham yuboriladi.
+    console.error('handleCallback ICHKI XATOSI:', err && err.stack ? err.stack : err);
+    try {
+      await sendMessage(chatId0, 'Kechirasiz, texnik xatolik yuz berdi. Iltimos, qayta urinib ko\'ring yoki /yordam orqali murojaat qiling.');
+    } catch (e2) { /* jim */ }
+    if (ADMIN_NOTIFY_CHAT_ID) {
+      try {
+        await sendMessage(ADMIN_NOTIFY_CHAT_ID,
+          `⚠️ BOT XATOSI (callback)\nChat: ${chatId0}\nData: ${callback.data}\n\n${(err && err.message) || err}`);
+      } catch (e3) { /* jim */ }
+    }
+  }
+}
+
+async function handleCallbackInner(callback) {
   const chatId = callback.message.chat.id;
   const data = callback.data;
   const callbackId = callback.id;
