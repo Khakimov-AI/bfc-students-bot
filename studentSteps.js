@@ -119,7 +119,7 @@ const STUDENT_STEPS = {
   program_selection: {
     label: 'Dastur',
     type: 'buttons',
-    question: 'Qaysi dastur asosida Koreaga ketayotganingizni tanlang:',
+    question: '1-savol: Siz Universitetga qaysi dastur asosida hujjat topshirmoqchisiz?',
     options: [
       { text: 'Bakalavr', value: 'BAKALAVR' },
       { text: 'Kollej', value: 'KOLLEJ' },
@@ -145,7 +145,7 @@ const STUDENT_STEPS = {
   passport_number: {
     label: 'Passport raqami',
     type: 'text',
-    question: 'Zagran pasport seriya-raqamingizni bo\'sh joysiz, ketma-ket kiriting.\n\nNAMUNA: FB1234567',
+    question: '3-savol: Chet elga chiqish (zagran) passport seriyasi va raqamini namunadagidek kiriting.\n\nNAMUNA: FB1234567',
     validate: validators.passport,
     errorMsg: 'Format noto\'g\'ri. 2 harf + 7 raqam, bo\'sh joysiz kiriting (masalan: FB1234567).',
     sheetCol: 'N', // PASSPORT №
@@ -155,18 +155,20 @@ const STUDENT_STEPS = {
   // --- 1. ISM-FAMILYA (zagran ogohlantirishi + namuna bilan) ---
   full_name_warning: {
     type: 'buttons',
-    question: 'DIQQAT: Ism-familyangizni chet elga chiqish pasport(ZAGRAN)ingizdagidek kiriting. Bu ma\'lumot visa uchun ishlatiladi.',
-    options: [{ text: 'Ogohlantirildim', value: 'ack' }],
+    question: 'ESLATMA: Ism-familyangizni chet elga chiqish pasport(ZAGRAN)ingizdagidek kiriting. '
+      + 'Bu Universitetga topshirish va visa hujjatlari uchun foydalaniladi.',
+    options: [{ text: 'OGOHLANTIRILDIM', value: 'ack' }],
     sheetCol: null,
     next: () => 'full_name',
   },
   full_name: {
     label: 'Ism-familya',
     type: 'text',
-    question: 'DIQQAT: Zagran passportda yozilganidek, LOTIN harflarida kiriting.\n'
+    question: 'DIQQAT:\n'
+      + 'Ism familyangizni Chet elga chiqish (Zagran) passportda yozilganidek, LOTIN harflarida kiriting.\n'
       + '• Apostrof (\') ishlatilmaydi: O\'G\'LI emas — UGLI\n'
-      + '• "X" o\'rniga ko\'pincha "KH" yoziladi: XAKIMOV emas — KHAKIMOV\n'
-      + '• To\'liq: familya + ism + otasining ismi\n\n'
+      + '• "X" o\'rniga ko\'pincha "KH" yoziladi: XAKIMOV emas — KHAKIMOV bo\'lishi mumkin\n'
+      + '• To\'liq: Familya + Ism + otasining ismi + UGLI\n\n'
       + 'To\'liq ism-familyangizni kiriting.\n\n'
       + 'NAMUNA: ABDULLAEV ADBULLAJON ABDULLAJON UGLI',
     validate: validators.fullName,

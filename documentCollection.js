@@ -28,100 +28,22 @@ const DOCUMENT_TYPES = [
   { code: 'ID', label: 'ID karta' },
   { code: 'PASSPORT', label: 'Passport (chet elga chiqish)' },
   { code: 'DIPLOM', label: 'Diplom yoki shahodatnoma' },
-  { code: 'BIRTH_CERT', label: "Tug'ilganlik to'g'risidagi ma'lumotnoma (Metrka)" },
-  { code: 'PHOTO', label: 'Rasm 3x4' },
-  { code: 'FATHER_PASSPORT', label: 'Otangizning passporti' },
-  { code: 'MOTHER_PASSPORT', label: 'Onangizning passporti' },
-  { code: 'FATHER_DEATH_CERT', label: "Otangizning o'limi to'g'risidagi ma'lumotnoma" },
-  { code: 'MOTHER_DEATH_CERT', label: "Onangizning o'limi to'g'risidagi ma'lumotnoma" },
-  { code: 'DIVORCE_CERT', label: "Ajrashganlik to'g'risidagi ma'lumotnoma" },
+  { code: 'BIRTH_CERT', label: 'Birth certificate' },
+  { code: 'PHOTO', label: 'Photo' },
+  { code: 'FATHER_PASSPORT', label: "Father's passport" },
+  { code: 'MOTHER_PASSPORT', label: "Mother's passport" },
   { code: 'CERTIFICATE', label: 'Sertifikat (til)' },
   { code: 'BANK_STATEMENT_UNIVERSITY', label: 'Bank statement (Universitet uchun)' },
-  { code: 'KDB', label: 'KDB' },
+  { code: 'BANK_STATEMENT_EMBASSY_STUDENT', label: 'Bank statement (Elchixona uchun)' },
   { code: 'BANK_STATEMENT_EMBASSY_PARENT', label: 'Ota-ona Bank statement (Elchixona uchun)' },
   { code: 'PARENT_INCOME', label: "Ota-ona yillik daromadi / mol-mulk hujjati" },
-  // PARENT_INCOME ichidagi ierarxiya (til sertifikati kabi)
-  { code: 'FATHER_INCOME', label: "Otangizning yillik daromadi" },
-  { code: 'MOTHER_INCOME', label: "Onangizning yillik daromadi" },
-  { code: 'HOUSE_KADASTR', label: "Uy kadastr ma'lumotnomasi" },
-  { code: 'CAR_TECH', label: "Mashina texnik passporti" },
-  { code: 'OTHER_ASSETS', label: 'Boshqa hujjatlar' },
-  { code: 'NO_ASSETS', label: "Daromad va mol-mulk mavjud emas" },
 ];
-
-// PARENT_INCOME tugmasi bosilganda chiqadigan ichki tugmalar
-const PARENT_INCOME_CODES = [
-  'FATHER_INCOME',
-  'MOTHER_INCOME',
-  'HOUSE_KADASTR',
-  'CAR_TECH',
-  'OTHER_ASSETS',
-  'NO_ASSETS',
-];
-
-// Bir nechta fayl yuborilishi mumkin bo'lgan hujjatlar (masalan
-// 3 tagacha mashina texnik passporti). Har yuborilgandan keyin bot
-// "yana bormi?" deb so'raydi.
-const MULTI_UPLOAD_CODES = ['CAR_TECH', 'OTHER_ASSETS'];
-const MULTI_UPLOAD_MAX = 3;
-
-// "Hech qanday daromad/mol-mulk yo'q" tanlansa, fayl so'ralmaydi —
-// PARENT_INCOME darhol bajarilgan deb belgilanadi.
-const NO_FILE_CODES = ['NO_ASSETS'];
 
 const BANK_STATEMENT_CODES = [
   'BANK_STATEMENT_UNIVERSITY',
-  'KDB',
+  'BANK_STATEMENT_EMBASSY_STUDENT',
   'BANK_STATEMENT_EMBASSY_PARENT',
 ];
-
-// Ota-ona holatiga bog'liq hujjatlar — ular DOIM so'ralmaydi,
-// faqat tegishli holat bo'lganda ro'yxatga qo'shiladi.
-const CONDITIONAL_DOCS = [
-  'FATHER_PASSPORT', 'MOTHER_PASSPORT',
-  'FATHER_DEATH_CERT', 'MOTHER_DEATH_CERT', 'DIVORCE_CERT',
-];
-
-// VIZA BOSQICHI hujjatlari — boshida so'ralmaydi. Talaba universitetga
-// qabul qilinib, kontraktni to'lagandan keyin, ADMIN buyrug'i bilan
-// (/viza) shu hujjatlar talab qilinadigan ro'yxatga qo'shiladi.
-const VISA_STAGE_DOCS = [
-  'KDB',
-  'BANK_STATEMENT_EMBASSY_PARENT',
-];
-
-// Birinchi bosqichda (universitetga topshirish uchun) talab
-// qilinadigan hujjatlar — shartli va viza bosqichi hujjatlarisiz.
-const BASE_REQUIRED_DOCS = DOCUMENT_TYPES
-  .map((d) => d.code)
-  .filter((code) => !CONDITIONAL_DOCS.includes(code)
-    && !VISA_STAGE_DOCS.includes(code)
-    && !PARENT_INCOME_CODES.includes(code));
-
-/**
- * Ota va ona holatiga qarab (NORMAL / DEAD / DIVORCED), BIRINCHI
- * BOSQICHDA talab qilinadigan hujjatlar ro'yxatini shakllantiradi.
- * Viza bosqichi hujjatlari (KDB, ota-ona elchixona statement) bu
- * ro'yxatga KIRMAYDI — ular keyinroq admin tomonidan qo'shiladi.
- * @param {string} fatherName - AF ustuni qiymati ('DEAD'/'DIVORCED'/ism)
- * @param {string} motherName - AI ustuni qiymati
- */
-function buildRequiredDocs(fatherName, motherName) {
-  const docs = [...BASE_REQUIRED_DOCS];
-  const f = String(fatherName || '').trim().toUpperCase();
-  const m = String(motherName || '').trim().toUpperCase();
-
-  if (f === 'DEAD') docs.push('FATHER_DEATH_CERT');
-  else if (f !== 'DIVORCED' && f !== '') docs.push('FATHER_PASSPORT');
-
-  if (m === 'DEAD') docs.push('MOTHER_DEATH_CERT');
-  else if (m !== 'DIVORCED' && m !== '') docs.push('MOTHER_PASSPORT');
-
-  // Ota YOKI ona ajrashgan bo'lsa — ajrashganlik hujjati bir marta
-  if (f === 'DIVORCED' || m === 'DIVORCED') docs.push('DIVORCE_CERT');
-
-  return docs;
-}
 
 const REQUIRED_DOCS = DOCUMENT_TYPES.map((d) => d.code);
 
@@ -131,12 +53,11 @@ const REQUIRED_DOCS = DOCUMENT_TYPES.map((d) => d.code);
 
 /**
  * AN ustunidagi qiymatdan hozirgi "kam hujjatlar" ro'yxatini oladi.
- * Bo'sh bo'lsa — ota-ona holatiga qarab hisoblangan to'liq ro'yxat
- * qaytariladi (fatherName/motherName berilgan bo'lsa).
+ * Bo'sh bo'lsa — hammasi kam deb hisoblanadi (forma yangi boshlangan).
  */
-function getMissingDocs(anCellValue, fatherName, motherName) {
+function getMissingDocs(anCellValue) {
   if (!anCellValue || String(anCellValue).trim() === '') {
-    return buildRequiredDocs(fatherName, motherName);
+    return [...REQUIRED_DOCS];
   }
   return String(anCellValue)
     .split(',')
@@ -163,13 +84,11 @@ function isComplete(missingList) {
 
 function buildDocumentMenuKeyboard(missingList) {
   const rows = [];
+  const nonBankMissing = missingList.filter((c) => !BANK_STATEMENT_CODES.includes(c));
   const bankMissing = missingList.filter((c) => BANK_STATEMENT_CODES.includes(c));
-  const nonBankMissing = missingList.filter((c) =>
-    !BANK_STATEMENT_CODES.includes(c) && !PARENT_INCOME_CODES.includes(c));
 
   for (const code of nonBankMissing) {
     const doc = DOCUMENT_TYPES.find((d) => d.code === code);
-    if (!doc) continue;
     rows.push([{ text: doc.label, callback_data: `doc:${code}` }]);
   }
 
@@ -181,34 +100,11 @@ function buildDocumentMenuKeyboard(missingList) {
   return { inline_keyboard: rows };
 }
 
-function buildParentIncomeSubmenu() {
-  const labels = {
-    FATHER_INCOME: 'Otangizning yillik daromadi',
-    MOTHER_INCOME: 'Onangizning yillik daromadi',
-    HOUSE_KADASTR: "Uy kadastr ma'lumotnomasi",
-    CAR_TECH: 'Mashina texnik passporti',
-    OTHER_ASSETS: 'Boshqa hujjatlar',
-    NO_ASSETS: "Hech qanday daromad va mol-mulk mavjud emas",
-  };
-  const rows = PARENT_INCOME_CODES.map((code) => [{ text: labels[code], callback_data: `doc:${code}` }]);
-  rows.push([{ text: '\u2190 Orqaga', callback_data: 'doc:back' }]);
-  return { inline_keyboard: rows };
-}
-
-function buildMoreFilesKeyboard(code) {
-  return {
-    inline_keyboard: [[
-      { text: 'Yana yuboraman', callback_data: `more:${code}` },
-      { text: 'Tugadi \u2714\ufe0f', callback_data: `moredone:${code}` },
-    ]],
-  };
-}
-
 function buildBankStatementSubmenu(missingList) {
   const rows = [];
   const labels = {
     BANK_STATEMENT_UNIVERSITY: 'Universitet uchun',
-    KDB: 'KDB',
+    BANK_STATEMENT_EMBASSY_STUDENT: 'Elchixona uchun (talaba)',
     BANK_STATEMENT_EMBASSY_PARENT: 'Elchixona uchun (ota-ona)',
   };
   for (const code of BANK_STATEMENT_CODES) {
@@ -258,27 +154,14 @@ function sendDocumentToGroup(fileType, fileId, contractId, docCode) {
       let body = '';
       res.on('data', (chunk) => (body += chunk));
       res.on('end', () => {
-        let parsed;
         try {
-          parsed = JSON.parse(body);
+          resolve(JSON.parse(body));
         } catch (e) {
-          console.error('sendDocumentToGroup: javobni JSON qilib o\'qib bo\'lmadi:', body);
-          return resolve({ ok: false, description: 'Invalid JSON response' });
+          resolve(null);
         }
-        if (!parsed.ok) {
-          // MUHIM: bu xato konteyner loglarida ko'rinadi (docker logs orqali).
-          // Eng ko'p uchraydigan sabablar: bot guruhga a'zo emas,
-          // message_thread_id noto'g'ri/mavjud emas, yoki bot guruhda
-          // xabar yozish huquqiga ega emas.
-          console.error('sendDocumentToGroup XATO:', JSON.stringify(parsed));
-        }
-        resolve(parsed);
       });
     });
-    req.on('error', (err) => {
-      console.error('sendDocumentToGroup tarmoq xatosi:', err);
-      resolve({ ok: false, description: err.message });
-    });
+    req.on('error', reject);
     req.write(data);
     req.end();
   });
@@ -313,22 +196,12 @@ function sendDocumentToGroup(fileType, fileId, contractId, docCode) {
 module.exports = {
   DOCUMENT_TYPES,
   REQUIRED_DOCS,
-  BASE_REQUIRED_DOCS,
-  CONDITIONAL_DOCS,
-  VISA_STAGE_DOCS,
   BANK_STATEMENT_CODES,
-  PARENT_INCOME_CODES,
-  MULTI_UPLOAD_CODES,
-  MULTI_UPLOAD_MAX,
-  NO_FILE_CODES,
-  buildRequiredDocs,
   getMissingDocs,
   markDocReceived,
   isComplete,
   buildDocumentMenuKeyboard,
   buildBankStatementSubmenu,
-  buildParentIncomeSubmenu,
-  buildMoreFilesKeyboard,
   buildMissingDocsText,
   sendDocumentToGroup,
   DOCUMENT_GROUP_CHAT_ID,

@@ -569,9 +569,32 @@ async function findStudentChatId(contractId) {
 // dastlabki variant, o'zgartirish uchun faqat shu ro'yxatni tahrirlang.
 const STATUS_MESSAGES = {
   'SHARTNOMA QILDI': 'Siz biz bilan shartnoma tuzdingiz. Keyingi bosqichga o\'tish uchun boshlang\'ich to\'lovni amalga oshirishingiz kerak.',
-  "TO'LOV QILMADI": 'Hozircha to\'lovingiz qayd etilmagan. Jarayonni boshlash uchun boshlang\'ich to\'lovni amalga oshiring.',
+  "TO'LOV QILMADI": '\ud83c\udf93 Keyingi bosqichga o\u2018tishga tayyormisiz?\n\n'
+    + 'Hurmatli mijoz, sizning ma\u2019lumotlaringiz qabul qilindi va endi universitetlarga '
+    + 'hujjat topshirish jarayonining keyingi bosqichiga o\u2018tish vaqti keldi. \ud83d\ude80\n\n'
+    + 'Siz tanlagan universitetlarga hujjatlaringizni tayyorlash va topshirish jarayonini '
+    + 'boshlashimiz uchun boshlang\u2018ich to\u2018lovni amalga oshirishingiz kerak.\n\n'
+    + '\ud83d\udcb3 To\u2018lov amalga oshirilgach:\n'
+    + '\u2705 Hujjatlaringizni tayyorlash jarayoni boshlanadi\n'
+    + '\u2705 Tanlagan universitetlaringiz bo\u2018yicha ishlar davom ettiriladi\n'
+    + '\u2705 Keyingi bosqichlarga o\u2018tasiz\n'
+    + '\u2705 Maqsadingiz \u2014 xorijda ta\u2019lim olishga yana bir qadam yaqinlashasiz! \ud83c\udf93\ud83c\udf0f\n\n'
+    + '\u23f3 Muhim: boshlang\u2018ich to\u2018lov amalga oshirilmaguncha hujjatlarni '
+    + 'tayyorlash jarayoni boshlanmaydi.\n\n'
+    + 'Bugun bir qadam tashlang \u2014 ertangi natijangizni bugundan boshlang! \ud83d\udd25',
   "TO'LOV QILDI": 'Sizning boshlang\'ich to\'lovingiz amalga oshirilgan. Keyingi bosqichga darhol o\'tishimiz uchun hujjatlaringizni to\'liq taqdim qilishingiz kerak!',
-  "HUJJAT YIG'ILMOQDA": 'Hozir hujjatlaringiz yig\'ilmoqda. Yetishmayotgan hujjatlarni tezroq yuboring.',
+  "HUJJAT YIG'ILMOQDA": '\ud83c\uddf0\ud83c\uddf7 Koreyada o\u2018qish maqsadingiz sari navbatdagi qadam \u2014 '
+    + 'hujjatlaringizni to\u2018liq topshirish!\n\n'
+    + 'Siz jarayonni boshladingiz. Endi eng muhim vazifa \u2014 hujjatlarni imkon qadar tezroq '
+    + 'yig\u2018ib, bizga yuborish. \ud83d\udcd1\ud83d\ude80\n\n'
+    + 'Har bir yuborilgan hujjat sizni universitetga topshirish bosqichiga bir qadam yaqinlashtiradi.\n\n'
+    + '\ud83d\udd25 Hujjatlaringiz to\u2018liq bo\u2018lsa:\n'
+    + '\u2705 Hujjatlaringizni tayyorlashni boshlaymiz\n'
+    + '\u2705 Tanlagan universitetlaringizga topshirish jarayonini boshlaymiz\n'
+    + '\u2705 Siz keyingi bosqichga o\u2018tasiz\n\n'
+    + '\u23f3 Vaqtni cho\u2018zmasdan, yetishmayotgan hujjatlarni bugunoq yuboring.\n\n'
+    + 'Bugun yuborgan bitta hujjatingiz \u2014 ertangi katta maqsadingizga qo\u2018yilgan yana bir qadam. \ud83c\uddf0\ud83c\uddf7\ud83c\udf93\n\n'
+    + '\ud83d\udc49 Hujjatlarni yuborishni boshlang va Koreyadagi ta\u2019lim sari yo\u2018lingizni tezlashtiring!',
   "HUJJAT TO'LIQ": 'Barcha hujjatlaringiz qabul qilindi. Mutaxassislarimiz ularni tekshirmoqda.',
   'HUJJAT TAYYOR': 'Hujjatlaringiz universitetga topshirishga tayyorlandi.',
   'UNIVERSITY 1 TOPSHIRILDI': 'Hujjatlaringiz birinchi universitetga topshirildi. Natijani kutmoqdamiz.',
@@ -1582,9 +1605,11 @@ async function processUpdate(body) {
       }
       userStates.set(chatId, { mode: 'awaiting_id' });
       await sendMessage(chatId,
-        'Assalomu alaykum! Bright Future Consulting botiga xush kelibsiz.\n\n'
-        + 'Boshlash uchun biz bilan qilgan shartnoma raqamingizni kiriting.\n\n'
-        + 'Botdan qanday foydalanishni bilish uchun 📖 Qo\'llanma tugmasini bosing.',
+        'Assalom alaykum hurmatli mijoz sizni Bright Future kompaniyasi bilan '
+        + 'shartnoma imzolaganingiz bilan tabriklaymiz! 🎉 '
+        + 'Bu — katta maqsad sari tashlangan muhim qadam. 🎓\n\n'
+        + 'Ma\'lumotlaringizni taqdim qilshni boshlash uchun biz bilan qilgan '
+        + 'shartnoma raqamingizni kiriting:',
         keyboardForUser(chatId));
       return;
     }
@@ -2101,7 +2126,16 @@ async function processUpdate(body) {
         await sendWelcomeVideo(chatId);
       }
 
-      await sendMessage(chatId, 'Shartnoma tasdiqlandi. Ma\'lumot kiritishni boshlaymiz.', keyboardForUser(chatId));
+      await sendMessage(chatId,
+        'Shartnomangiz muvaffaqiyatli tasdiqlandi. Endi esa hujjatlaringiz bo\u2018yicha '
+        + 'ma\u2019lumotlarni kiritish va keyingi jarayonlarni boshlashga kirishamiz. \ud83d\udcd1\n\n'
+        + 'Keyingi bosqichlarda taqdim qiladigan ma\'lumotlaringiz va hujjatlaringiz '
+        + 'universitetga topshirish bosqichi va elchixonadan viza olish bosqichlarida '
+        + 'foydalaniladi, shuning uchun ma\'lumotlaringizni to\'g\'ri taqdim qilishingiz '
+        + 'muhim ahamiyat kasb etadi.\n\n'
+        + 'ESLATMA: Noto\'g\'ri taqdim qilgan ma\'lumotlar salbiy natijalarga olib kelishi '
+        + 'mumkin. Iltimos e\'tiborli bo\'ling\u2757\ufe0f',
+        keyboardForUser(chatId));
       await renderStep(chatId, rowNum, stepKey, {});
       return;
     }
