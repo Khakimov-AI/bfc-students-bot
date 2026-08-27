@@ -1750,22 +1750,25 @@ async function processUpdate(body) {
       }
 
       if (text === BTN.DOCS) {
-        if (!s.row) {
+        // Sessiya RAM'da yo'q bo'lsa (server restart) — Sheet'dan tiklaymiz
+        const ds = s.row ? s : await getOrRestoreSession(chatId);
+        if (!ds || !ds.row) {
           await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting.', keyboardForUser(chatId));
           return;
         }
-        const rowData = await getRowData(s.row);
+        const rowData = await getRowData(ds.row);
         const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
         await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
         return;
       }
 
       if (text === BTN.STATUS) {
-        if (!s.contractId) {
+        const ss = s.contractId ? s : await getOrRestoreSession(chatId);
+        if (!ss || !ss.contractId) {
           await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting.', keyboardForUser(chatId));
           return;
         }
-        await sendStudentStatus(chatId, s.contractId, s.row);
+        await sendStudentStatus(chatId, ss.contractId, ss.row);
         return;
       }
 
@@ -2544,6 +2547,53 @@ async function handleGroupMessage(message) {
   // Boshqa guruh xabarlari — javob berilmaydi (spam qilmaslik uchun)
 }
 
+/**
+ * Sessiya RAM'da (userStates) saqlanadi va server qayta ishga
+ * tushganda yo'qoladi. Bu funksiya sessiyani DRAFT sahifasidan
+ * chat_id bo'yicha AVTOMATIK tiklaydi — talaba qaytadan /start
+ * bosishi shart emas.
+ * @returns {Object|null} tiklangan sessiya yoki null
+ */
+async function restoreSessionByChatId(chatId) {
+  try {
+    // AQ ustuni = TELEGRAM_CHAT_ID, D ustuni = shartnoma ID
+    const rows = await readSheetRange(`${DRAFT_SHEET}!D2:D2000`);
+    const chatCol = await readSheetRange(`${DRAFT_SHEET}!${TELEGRAM_CHAT_ID_COLUMN}2:${TELEGRAM_CHAT_ID_COLUMN}2000`);
+    if (!chatCol) return null;
+    const target = String(chatId).trim();
+    for (let i = 0; i < chatCol.length; i++) {
+      const v = chatCol[i] && chatCol[i][0] ? String(chatCol[i][0]).trim() : '';
+      if (v !== target) continue;
+      const rowNum = i + 2;
+      const contractId = (rows && rows[i] && rows[i][0]) ? String(rows[i][0]).trim().toUpperCase() : '';
+      if (!contractId) return null;
+      const session = { mode: 'in_form', row: rowNum, contractId, editing: false };
+      userStates.set(chatId, session);
+      console.log(`Sessiya tiklandi: chat ${chatId} -> qator ${rowNum} (${contractId})`);
+      return session;
+    }
+  } catch (e) {
+    console.error('Sessiyani tiklashda xato:', e && e.message);
+  }
+  return null;
+}
+
+/**
+ * Sessiyani oladi; RAM'da bo'lmasa Sheet'dan tiklashga urinadi.
+ */
+async function getOrRestoreSession(chatId) {
+  const s = userStates.get(chatId);
+  if (s && s.row) return s;
+  const restored = await restoreSessionByChatId(chatId);
+  if (restored && s) {
+    // RAM'dagi vaqtinchalik holatlarni (masalan mode) saqlab qolamiz
+    const merged = { ...restored, ...s, row: restored.row, contractId: restored.contractId };
+    userStates.set(chatId, merged);
+    return merged;
+  }
+  return restored;
+}
+
 async function handleCallback(callback) {
   const chatId = callback.message.chat.id;
   const data = callback.data;
@@ -2665,7 +2715,7 @@ async function handleCallback(callback) {
     return;
   }
   if (data === 'menu:docs') {
-    const s = userStates.get(chatId);
+    const s = await getOrRestoreSession(chatId);
     answerCallbackQuery(callbackId, '');
     if (!s || !s.row) {
       await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting (/start).');
@@ -2685,7 +2735,7 @@ async function handleCallback(callback) {
     return;
   }
   if (data === 'menu:status') {
-    const s = userStates.get(chatId);
+    const s = await getOrRestoreSession(chatId);
     answerCallbackQuery(callbackId, '');
     if (!s || !s.row) {
       await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting (/start).');
@@ -2824,7 +2874,16 @@ async function handleCallback(callback) {
     return;
   }
 
-  const session = userStates.get(chatId);
+  let session = userStates.get(chatId);
+
+  // Sessiya RAM'da yo'q (server qayta ishga tushgan) — Sheet'dan
+  // avtomatik tiklashga urinamiz. Bu tuzatishdan oldin talaba
+  // "Sessiya topilmadi" xabarini olib, qaytadan /start bosishga
+  // majbur bo'lardi va hujjat tugmalari umuman ishlamasdi.
+  if (!session || !session.row) {
+    const restored = await getOrRestoreSession(chatId);
+    if (restored) session = restored;
+  }
 
   if (!session) {
     answerCallbackQuery(callbackId, 'Sessiya topilmadi, /start bosing.');
