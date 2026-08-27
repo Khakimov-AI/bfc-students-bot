@@ -89,27 +89,60 @@ async function readSheetRange(range) {
   return res.data.values;
 }
 
+/**
+ * Sheets amalini qayta urinish bilan bajaradi. Google Sheets API
+ * kvota limitiga urilganda (429) yoki vaqtinchalik server xatosida
+ * (5xx) darhol taslim bo'lmasdan, kutib qayta uriniladi.
+ * Bu tuzatishdan oldin: bir vaqtda ko'p talaba hujjat yuborsa,
+ * kvota tugab, hujjat guruhga ketardi-yu, DOCUMENT_LOG'ga
+ * yozilmasdan qolardi.
+ */
+async function withRetry(fn, label, attempts = 4) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const code = err && (err.code || (err.response && err.response.status));
+      const retriable = code === 429 || code === 503 || code === 500 || code === 502;
+      if (!retriable || i === attempts - 1) break;
+      // Kutish vaqti har urinishda ortadi: 1s, 2s, 4s
+      const waitMs = 1000 * Math.pow(2, i);
+      console.warn(`${label}: ${code} xatosi, ${waitMs}ms dan keyin qayta urinish (${i + 1}/${attempts})`);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  throw lastErr;
+}
+
 async function appendRow(range, values) {
-  const client = await auth.getClient();
-  const sheets = google.sheets({ version: 'v4', auth: client });
-  return sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range,
-    valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'OVERWRITE',
-    resource: { values: [values] },
-  });
+  return withRetry(async () => {
+    const client = await auth.getClient();
+    const sheets = google.sheets({ version: 'v4', auth: client });
+    return sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range,
+      valueInputOption: 'USER_ENTERED',
+      insertDataOption: 'OVERWRITE',
+      resource: { values: [values] },
+    });
+  }, `appendRow(${range})`);
 }
 
 async function updateCell(range, value) {
-  const client = await auth.getClient();
-  const sheets = google.sheets({ version: 'v4', auth: client });
-  return sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID,
-    range,
-    valueInputOption: 'USER_ENTERED',
-    resource: { values: [[value]] },
-  });
+  // Kvota/vaqtinchalik xatolarda avtomatik qayta uriniladi —
+  // aks holda ma'lumot jimgina yo'qolib ketishi mumkin.
+  return withRetry(async () => {
+    const client = await auth.getClient();
+    const sheets = google.sheets({ version: 'v4', auth: client });
+    return sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [[value]] },
+    });
+  }, `updateCell(${range})`);
 }
 
 /**
@@ -159,6 +192,7 @@ async function writeCurrentStep(rowNum, stepKey) {
 
 async function logDocument(contractId, docCode, fileType, fileId) {
   const now = new Date().toISOString();
+  // appendRow o'zi ichida qayta urinadi (withRetry)
   await appendRow(`${DOCUMENTS_LOG_SHEET}!A:E`, [now, contractId, docCode, fileType, fileId]);
 }
 
@@ -2199,7 +2233,21 @@ async function processUpdate(body) {
       // javob olishi kerak, jim qolmasligi kerak.
       try {
         await logDocument(contractId, docCode, fileType, fileId);
+      } catch (logErr) {
+        // JURNALGA YOZILMADI — bu jiddiy: fayl guruhga ketdi, lekin
+        // keyinchalik uni topib bo'lmaydi. Adminni darhol xabardor
+        // qilamiz, u qo'lda DOCUMENT_LOG'ga qo'sha oladi.
+        console.error(`DOCUMENT_LOG YOZILMADI (${contractId}/${docCode}):`, logErr && logErr.message);
+        if (ADMIN_NOTIFY_CHAT_ID) {
+          await sendMessage(ADMIN_NOTIFY_CHAT_ID,
+            `⚠️ DIQQAT: hujjat guruhga yuborildi, lekin DOCUMENT_LOG'ga YOZILMADI.\n\n`
+            + `Shartnoma: ${contractId}\nHujjat: ${docCode}\nTuri: ${fileType}\n`
+            + `file_id: ${fileId}\n\n`
+            + `Iltimos, shu qatorni DOCUMENT_LOG sahifasiga qo'lda qo'shing.`);
+        }
+      }
 
+      try {
         // Ko'p faylli hujjat (masalan mashina texnik passporti) —
         // "yana bormi?" so'raladi, ro'yxat hali yangilanmaydi.
         if (MULTI_UPLOAD_CODES.includes(docCode)) {
