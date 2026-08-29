@@ -1882,6 +1882,8 @@ async function processUpdate(body) {
           studentChatId: chatId,
           contractId,
           fullName,
+          answeredBy: null, // birinchi javob bergan hodim shu yerga yoziladi
+          forceAcknowledgedBy: new Set(), // ogohlantirishni "tan olgan" hodimlar
         });
       }
 
@@ -2482,13 +2484,31 @@ async function handleGroupMessage(message) {
     const helpInfo = pendingHelpReplies.get(message.reply_to_message.message_id);
     const staffLabel = username ? `@${username}` : (message.from ? message.from.first_name : 'Xodim');
 
+    // MUHIM: bu tekshiruv tugma orqali kirilganmi yoki to'g'ridan-to'g'ri
+    // xabarga REPLY qilinganmi — farqi yo'q, har ikkala holatda ham
+    // ishlaydi. Aks holda hodim tugmani chetlab o'tib, ogohlantirishsiz
+    // javob yozib qo'yishi mumkin edi.
+    const alreadyAnswered = helpInfo.answeredBy && helpInfo.answeredBy !== staffLabel;
+    const acknowledged = helpInfo.forceAcknowledgedBy.has(staffLabel);
+
+    if (alreadyAnswered && !acknowledged) {
+      await sendMessage(chatId,
+        `⚠️ ${staffLabel}, bu yordam talabi bo'yicha ${helpInfo.answeredBy} allaqachon ko'mak bergan!\n\n`
+        + 'Agar baribir qo\'shimcha javob yozmoqchi bo\'lsangiz, tugmani bosing, keyin ASL XABARGA qayta REPLY qiling:',
+        { inline_keyboard: [[{ text: 'Ogohlantirildim, baribir yozaman', callback_data: `replyhelp_force:${message.reply_to_message.message_id}` }]] },
+        threadId);
+      return;
+    }
+
     await sendMessage(helpInfo.studentChatId,
       `💬 Sizning savolingizga javob:\n\n${rawText}\n\n— Bright Future jamoasi`);
 
+    // Birinchi javob berilgan hodimni eslab qolamiz — boshqa hodim
+    // shu so'rovga javob yozmoqchi bo'lsa, ogohlantiriladi.
+    if (!helpInfo.answeredBy) helpInfo.answeredBy = staffLabel;
+    pendingHelpReplies.set(message.reply_to_message.message_id, helpInfo);
+
     await sendMessage(chatId, `✅ Javob talabaga (${helpInfo.contractId || helpInfo.studentChatId}) yuborildi. (${staffLabel})`, null, threadId);
-    // MUHIM: entry o'chirilmaydi — hodim davomida yana bir necha
-    // marta REPLY qilib, xuddi shu talaba bilan yozishishni davom
-    // ettirishi mumkin (masalan talaba qo'shimcha savol bersa).
     return;
   }
 
@@ -2788,8 +2808,48 @@ async function handleCallbackInner(callback) {
       answerCallbackQuery(callbackId, 'Bu so\'rov muddati o\'tgan yoki allaqachon yopilgan.', true);
       return;
     }
+    const helpInfo = pendingHelpReplies.get(messageId);
+    const actorLabel = callback.from
+      ? (callback.from.username ? `@${callback.from.username}` : callback.from.first_name)
+      : 'Hodim';
+
+    // Boshqa hodim allaqachon javob bergan bo'lsa — ogohlantiramiz,
+    // lekin taqiqlamaymiz. "Ogohlantirildim" tugmasi bosilgach
+    // xohlagan hodim baribir yoza oladi.
+    if (helpInfo.answeredBy && helpInfo.answeredBy !== actorLabel && !helpInfo.forceAcknowledgedBy.has(actorLabel)) {
+      answerCallbackQuery(callbackId,
+        `Diqqat: bu yordam talabi bo'yicha ${helpInfo.answeredBy} allaqachon ko'mak bergan!`,
+        true);
+      await sendMessage(chatId,
+        `⚠️ ${actorLabel}, bu so'rov bo'yicha ${helpInfo.answeredBy} allaqachon javob bergan.\n\n`
+        + 'Agar baribir qo\'shimcha javob yozmoqchi bo\'lsangiz, quyidagi tugmani bosing:',
+        { inline_keyboard: [[{ text: 'Ogohlantirildim, baribir yozaman', callback_data: `replyhelp_force:${messageId}` }]] },
+        threadId);
+      return;
+    }
+
     answerCallbackQuery(callbackId,
       'Javobingizni SHU XABARGA REPLY qilib yozing — talabaga to\'g\'ridan-to\'g\'ri yetadi.',
+      true);
+    return;
+  }
+
+  // --- Ogohlantirilgandan keyin ham javob yozishga ruxsat ---
+  if (data.startsWith('replyhelp_force:')) {
+    const helpMsgId = parseInt(data.substring(16), 10);
+    if (!pendingHelpReplies.has(helpMsgId)) {
+      answerCallbackQuery(callbackId, 'Bu so\'rov muddati o\'tgan.', true);
+      return;
+    }
+    const helpInfo = pendingHelpReplies.get(helpMsgId);
+    const actorLabel = callback.from
+      ? (callback.from.username ? `@${callback.from.username}` : callback.from.first_name)
+      : 'Hodim';
+    helpInfo.forceAcknowledgedBy.add(actorLabel);
+    pendingHelpReplies.set(helpMsgId, helpInfo);
+
+    answerCallbackQuery(callbackId,
+      'Yaxshi. Javobingizni ASL YORDAM XABARIGA (yuqoridagi 🆘 xabarga) REPLY qilib yozing.',
       true);
     return;
   }
