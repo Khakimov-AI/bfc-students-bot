@@ -57,6 +57,12 @@ const userStates = new Map();
 // hodim shu xabarga REPLY qilib shartnoma raqamini yozadi.
 const pendingGroupRequests = new Map();
 
+// promptMessageId -> { studentChatId, contractId, fullName } — talaba
+// "Yordam" so'raganda guruhga yuboriladigan xabarga bog'lanadi.
+// Hodim shu xabarga REPLY qilsa, javob talabaga to'g'ridan-to'g'ri
+// yetkaziladi (alohida yozishuv ochish shart emas).
+const pendingHelpReplies = new Map();
+
 // Ustun harfini rowData obyekt kalitiga aylantirish uchun mos ustun
 // diapazoni (A dan AP gacha).
 const COLUMN_RANGE = 'A:AR';
@@ -152,9 +158,12 @@ async function updateCell(range, value) {
 async function findRowByContractId(contractId) {
   const rows = await readSheetRange(`${DRAFT_SHEET}!D2:D2000`);
   if (!rows) return null;
-  const normalizedInput = contractId.trim().toUpperCase();
+  // Ko'rinmas belgilarni (NBSP, zero-width space) ham tozalaymiz —
+  // Sheets'dan nusxalanganda bunday belgilar tez-tez kelib qoladi.
+  const clean = (v) => String(v).replace(/[\u00A0\u200B\uFEFF]/g, '').trim().toUpperCase();
+  const normalizedInput = clean(contractId);
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i] && String(rows[i][0]).trim().toUpperCase() === normalizedInput) {
+    if (rows[i] && clean(rows[i][0]) === normalizedInput) {
       return i + 2; // header hisobga olinadi
     }
   }
@@ -330,8 +339,8 @@ function sendMessage(chatId, text, replyMarkup, threadId) {
   });
 }
 
-function answerCallbackQuery(callbackQueryId, text) {
-  const data = JSON.stringify({ callback_query_id: callbackQueryId, text: text || '' });
+function answerCallbackQuery(callbackQueryId, text, showAlert) {
+  const data = JSON.stringify({ callback_query_id: callbackQueryId, text: text || '', show_alert: !!showAlert });
   const options = {
     hostname: 'api.telegram.org',
     path: `/bot${BOT_TOKEN}/answerCallbackQuery`,
@@ -1861,11 +1870,20 @@ async function processUpdate(body) {
         + `Telegram: @${username || 'username yo\'q'}\n\n`
         + `Savol: ${helpText}`;
 
-      // General topic'ga yuboriladi — message_thread_id UZATILMAYDI.
-      // (Telegram'da General oqimi thread ID'siz ishlaydi; agar
-      // DOCUMENT_TOPIC_ID berilsa, xabar "Original hujjatlar"
-      // topic'iga tushib qoladi.)
-      await sendMessage(DOCUMENT_GROUP_CHAT_ID, msg);
+      // "💬 Javob yozish" tugmasi — hodim bosib, shu xabarga REPLY
+      // qilib javob yozsa, javob talabaga TO'G'RIDAN-TO'G'RI yetadi.
+      // Bu tuzatishdan oldin: hodim talabaga alohida yozishuv ochib,
+      // uning username'ini qidirib topishga majbur edi.
+      const helpKeyboard = { inline_keyboard: [[{ text: '💬 Javob yozish', callback_data: `replyhelp:${chatId}` }]] };
+      const sentMsg = await sendMessage(DOCUMENT_GROUP_CHAT_ID, msg, helpKeyboard);
+
+      if (sentMsg && sentMsg.result && sentMsg.result.message_id) {
+        pendingHelpReplies.set(sentMsg.result.message_id, {
+          studentChatId: chatId,
+          contractId,
+          fullName,
+        });
+      }
 
       // Oldingi rejimga qaytarish (forma davom etsin)
       userStates.set(chatId, { ...session, mode: session.helpPrev || 'in_form' });
@@ -2120,7 +2138,13 @@ async function processUpdate(body) {
     if (session && session.mode === 'admin_return_awaiting_id') {
       const rowNum = await findRowByContractId(text);
       if (!rowNum) {
-        await sendMessage(chatId, 'Bunday shartnoma topilmadi. Qayta kiriting.');
+        await sendMessage(chatId,
+          `"${text.trim()}" — bunday shartnoma DRAFT sahifasida topilmadi.\n\n`
+          + 'Tekshiring:\n'
+          + '\u2022 Shartnoma raqami DRAFT sahifasining D ustunida borligini\n'
+          + '\u2022 Katta/kichik harf muammo emas, lekin belgilar (chiziqcha, bo\'sh joy) aniq mos kelishi kerak\n'
+          + '\u2022 Agar bu talaba allaqachon DB\'ga ko\'chirilgan bo\'lsa, DRAFT\'da qatori qolmagan bo\'lishi mumkin\n\n'
+          + 'Qayta kiriting:');
         return;
       }
       userStates.set(chatId, { mode: 'admin_return_selecting_docs', row: rowNum, contractId: text.trim().toUpperCase(), selectedCodes: [] });
@@ -2452,6 +2476,22 @@ async function handleGroupMessage(message) {
   // Guruhda buyruq "@bot_nomi" bilan kelishi mumkin — uni ajratamiz
   const text = rawText.split('@')[0].trim();
 
+  // ---- YORDAM SO'ROVIGA JAVOB: hodim tugma bosgan xabarga REPLY
+  // qilsa, javob talabaga to'g'ridan-to'g'ri yetkaziladi. ----
+  if (message.reply_to_message && pendingHelpReplies.has(message.reply_to_message.message_id) && rawText) {
+    const helpInfo = pendingHelpReplies.get(message.reply_to_message.message_id);
+    const staffLabel = username ? `@${username}` : (message.from ? message.from.first_name : 'Xodim');
+
+    await sendMessage(helpInfo.studentChatId,
+      `💬 Sizning savolingizga javob:\n\n${rawText}\n\n— Bright Future jamoasi`);
+
+    await sendMessage(chatId, `✅ Javob talabaga (${helpInfo.contractId || helpInfo.studentChatId}) yuborildi. (${staffLabel})`, null, threadId);
+    // MUHIM: entry o'chirilmaydi — hodim davomida yana bir necha
+    // marta REPLY qilib, xuddi shu talaba bilan yozishishni davom
+    // ettirishi mumkin (masalan talaba qo'shimcha savol bersa).
+    return;
+  }
+
   // ---- Hujjat so'rash (guruhga xos, reply asosida) ----
   if (text === '/menu') {
     await sendMessage(chatId, 'Hodimlar uchun funksiyalar:', {
@@ -2738,6 +2778,19 @@ async function handleCallbackInner(callback) {
       + 'Aniq va sodda yozing.\n\n'
       + 'Misol:\n"Passportning ma\'lumot sahifasini to\'liq suratga oling. '
       + 'Barcha 4 ta cheti ko\'rinsin, raqamlar aniq o\'qilsin, yorug\'lik yetarli bo\'lsin."');
+    return;
+  }
+
+  // --- "💬 Javob yozish" tugmasi (yordam so'roviga) ---
+  if (data.startsWith('replyhelp:')) {
+    const messageId = callback.message.message_id;
+    if (!pendingHelpReplies.has(messageId)) {
+      answerCallbackQuery(callbackId, 'Bu so\'rov muddati o\'tgan yoki allaqachon yopilgan.', true);
+      return;
+    }
+    answerCallbackQuery(callbackId,
+      'Javobingizni SHU XABARGA REPLY qilib yozing — talabaga to\'g\'ridan-to\'g\'ri yetadi.',
+      true);
     return;
   }
 
