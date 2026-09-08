@@ -66,10 +66,10 @@ const pendingHelpReplies = new Map();
 // Ustun harfini rowData obyekt kalitiga aylantirish uchun mos ustun
 // diapazoni (A dan AP gacha).
 const COLUMN_RANGE = 'A:AR';
-const LAST_COLUMN_INDEX = 44; // AR = 44-ustun
+const LAST_COLUMN_INDEX = 49; // AW = 49-ustun
 
-const TELEGRAM_CHAT_ID_COLUMN = 'AQ'; // raqamli chat_id (proaktiv xabar yuborish uchun)
-const LAST_DOC_REMINDER_COLUMN = 'AR'; // oxirgi eslatma yuborilgan sana+soat
+const TELEGRAM_CHAT_ID_COLUMN = 'AU'; // raqamli chat_id (proaktiv xabar yuborish uchun)
+const LAST_DOC_REMINDER_COLUMN = 'AV'; // oxirgi eslatma yuborilgan sana+soat
 
 function colIndexToLetter(idx) {
   // 1-based index -> 'A', 'B', ... 'Z', 'AA', 'AB' ...
@@ -156,7 +156,7 @@ async function updateCell(range, value) {
  * @returns {number|null} qator raqami (1-based, header bilan) yoki null
  */
 async function findRowByContractId(contractId) {
-  const rows = await readSheetRange(`${DRAFT_SHEET}!D2:D2000`);
+  const rows = await readSheetRange(`${DRAFT_SHEET}!H2:H2000`);
   if (!rows) return null;
   // Ko'rinmas belgilarni (NBSP, zero-width space) ham tozalaymiz —
   // Sheets'dan nusxalanganda bunday belgilar tez-tez kelib qoladi.
@@ -175,7 +175,7 @@ async function findRowByContractId(contractId) {
  * aylantiradi.
  */
 async function getRowData(rowNum) {
-  const range = `${DRAFT_SHEET}!A${rowNum}:AR${rowNum}`;
+  const range = `${DRAFT_SHEET}!A${rowNum}:AW${rowNum}`;
   const result = await readSheetRange(range);
   const row = (result && result[0]) || [];
   const data = {};
@@ -1194,11 +1194,11 @@ const EDIT_EXIT_KEYS = new Set([
 // tozalash kerak (aks holda yangi yo'l ularga tegmasa, eski qiymat
 // qolib ketadi).
 const EDIT_ROOT_CLEAR_COLS = {
-  zagran_status: ['N'],
-  certificate_status: ['J', 'K', 'AC', 'AD'],
-  certificate_type: ['K', 'AC', 'AD'],
-  certificate_type_taker: ['K', 'AC', 'AD'],
-  rejection_history: ['AE'],
+  zagran_status: ['R'],           // eski N -> yangi R (PASSPORT №)
+  certificate_status: ['N', 'O', 'AG', 'AH'], // eski J,K,AC,AD -> yangi N,O,AG,AH
+  certificate_type: ['O', 'AG', 'AH'],
+  certificate_type_taker: ['O', 'AG', 'AH'],
+  rejection_history: ['AI'],      // eski AE -> yangi AI
 };
 
 async function renderStep(chatId, rowNum, stepKey, sessionData, isEditingChain) {
@@ -1777,7 +1777,7 @@ async function processUpdate(body) {
           return;
         }
         const rowData = await getRowData(ds.row);
-        const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+        const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
         await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
         return;
       }
@@ -1858,7 +1858,7 @@ async function processUpdate(body) {
       if (session.row) {
         try {
           const rowData = await getRowData(session.row);
-          fullName = rowData.E || '';
+          fullName = rowData.I || '';
           stage = rowData[CURRENT_STEP_COLUMN] || rowData.B || '';
         } catch (e) { console.error('Yordam: qator o\'qishda xato', e); }
       }
@@ -1945,7 +1945,7 @@ async function processUpdate(body) {
       if (session.row) {
         try {
           const rowData = await getRowData(session.row);
-          fullName = rowData.E || '';
+          fullName = rowData.I || '';
         } catch (e) { /* jim */ }
       }
 
@@ -2099,9 +2099,9 @@ async function processUpdate(body) {
         if (!rowNum) { results.push(`${id} — topilmadi`); continue; }
 
         const rowData = await getRowData(rowNum);
-        const currentMissing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+        const currentMissing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
         const newMissing = Array.from(new Set([...currentMissing, ...VISA_STAGE_DOCS]));
-        await updateCell(`${DRAFT_SHEET}!AN${rowNum}`, newMissing.join(', '));
+        await updateCell(`${DRAFT_SHEET}!AR${rowNum}`, newMissing.join(', '));
         await updateCell(`${DRAFT_SHEET}!B${rowNum}`, 'VIZA BOSQICHI');
 
         const studentChatId = rowData[TELEGRAM_CHAT_ID_COLUMN];
@@ -2174,7 +2174,7 @@ async function processUpdate(body) {
       // orqali tasdiqlash talab qilinadi. Yangi/bo'sh qator uchun
       // (hali hech kim kirmagan) tekshiruv shart emas — sizib chiqadigan
       // ma'lumot hali yo'q.
-      if (rowData.U && rowData.U !== username) {
+      if (rowData.Y && rowData.Y !== username) {
         userStates.set(chatId, {
           mode: 'awaiting_phone_verify',
           row: rowNum,
@@ -2185,8 +2185,8 @@ async function processUpdate(body) {
         return;
       }
 
-      if (!rowData.U && username) {
-        await updateCell(`${DRAFT_SHEET}!U${rowNum}`, username);
+      if (!rowData.Y && username) {
+        await updateCell(`${DRAFT_SHEET}!Y${rowNum}`, username);
         await updateCell(`${DRAFT_SHEET}!${TELEGRAM_CHAT_ID_COLUMN}${rowNum}`, String(chatId));
       }
 
@@ -2217,7 +2217,7 @@ async function processUpdate(body) {
     // --- Telefon raqami oxirgi 4 raqami orqali tasdiqlash ---
     if (session.mode === 'awaiting_phone_verify') {
       const rowData = await getRowData(session.row);
-      const storedPhone = String(rowData.Q || '').trim();
+      const storedPhone = String(rowData.U || '').trim();
       const enteredLast4 = text.replace(/\D/g, '').slice(-4);
       const storedLast4 = storedPhone.slice(-4);
 
@@ -2229,7 +2229,7 @@ async function processUpdate(body) {
 
       // Tasdiqlandi — username yangilanadi (masalan talaba yangi
       // qurilma/akkaunt ishlatayotgan bo'lishi mumkin)
-      await updateCell(`${DRAFT_SHEET}!U${session.row}`, session.pendingUsername);
+      await updateCell(`${DRAFT_SHEET}!Y${session.row}`, session.pendingUsername);
       await updateCell(`${DRAFT_SHEET}!${TELEGRAM_CHAT_ID_COLUMN}${session.row}`, String(chatId));
       const stepKey = findResumeStep(rowData);
       userStates.set(chatId, { mode: 'in_form', row: session.row, contractId: session.contractId, editing: false });
@@ -2241,7 +2241,7 @@ async function processUpdate(body) {
     // --- Hujjatlar buyrug'i ---
     if (text === '/hujjatlar' && session.mode === 'in_form') {
       const rowData = await getRowData(session.row);
-      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+      const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
       await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
       return;
     }
@@ -2308,9 +2308,9 @@ async function processUpdate(body) {
         const markCode = PARENT_INCOME_CODES.includes(docCode) ? 'PARENT_INCOME' : docCode;
 
         const rowData = await getRowData(session.row);
-        const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+        const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
         const { updatedList, cellValue } = markDocReceived(missing, markCode);
-        await updateCell(`${DRAFT_SHEET}!AN${session.row}`, cellValue);
+        await updateCell(`${DRAFT_SHEET}!AR${session.row}`, cellValue);
 
         if (isComplete(updatedList)) {
           await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
@@ -2414,9 +2414,9 @@ async function saveDocSample(chatId, session, fileId, fileType) {
 async function finalizeDocReturn(adminChatId, session, sampleFileId, sampleFileType) {
   try {
     const rowData = await getRowData(session.row);
-    const currentMissing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+    const currentMissing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
     const newMissing = Array.from(new Set([...currentMissing, ...session.selectedCodes]));
-    await updateCell(`${DRAFT_SHEET}!AN${session.row}`, newMissing.join(', '));
+    await updateCell(`${DRAFT_SHEET}!AR${session.row}`, newMissing.join(', '));
     await updateCell(`${DRAFT_SHEET}!B${session.row}`, 'MA\'LUMOT TASDIQLANDI');
 
     const studentChatId = rowData[TELEGRAM_CHAT_ID_COLUMN];
@@ -2640,8 +2640,8 @@ async function handleGroupMessage(message) {
  */
 async function restoreSessionByChatId(chatId) {
   try {
-    // AQ ustuni = TELEGRAM_CHAT_ID, D ustuni = shartnoma ID
-    const rows = await readSheetRange(`${DRAFT_SHEET}!D2:D2000`);
+    // AU ustuni = TELEGRAM_CHAT_ID, H ustuni = shartnoma ID
+    const rows = await readSheetRange(`${DRAFT_SHEET}!H2:H2000`);
     const chatCol = await readSheetRange(`${DRAFT_SHEET}!${TELEGRAM_CHAT_ID_COLUMN}2:${TELEGRAM_CHAT_ID_COLUMN}2000`);
     if (!chatCol) return null;
     const target = String(chatId).trim();
@@ -2881,7 +2881,7 @@ async function handleCallbackInner(callback) {
       return;
     }
     const rowData = await getRowData(s.row);
-    const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+    const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
     await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
     return;
   }
@@ -3146,9 +3146,9 @@ async function handleCallbackInner(callback) {
     userStates.set(chatId, session);
     try {
       const rowData = await getRowData(session.row);
-      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+      const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
       const { updatedList, cellValue } = markDocReceived(missing, 'PARENT_INCOME');
-      await updateCell(`${DRAFT_SHEET}!AN${session.row}`, cellValue);
+      await updateCell(`${DRAFT_SHEET}!AR${session.row}`, cellValue);
       if (isComplete(updatedList)) {
         await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
         await sendFullDocumentSetToAdmin(session.contractId);
@@ -3170,7 +3170,7 @@ async function handleCallbackInner(callback) {
 
     if (code === 'bank_menu') {
       const rowData = await getRowData(session.row);
-      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+      const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
       await sendMessage(chatId, 'Qaysi bank statement turini yuborasiz?', buildBankStatementSubmenu(missing));
       return;
     }
@@ -3184,9 +3184,9 @@ async function handleCallbackInner(callback) {
     if (NO_FILE_CODES.includes(code)) {
       try {
         const rowData = await getRowData(session.row);
-        const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+        const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
         const { updatedList, cellValue } = markDocReceived(missing, 'PARENT_INCOME');
-        await updateCell(`${DRAFT_SHEET}!AN${session.row}`, cellValue);
+        await updateCell(`${DRAFT_SHEET}!AR${session.row}`, cellValue);
         await logDocument(session.contractId, 'NO_ASSETS', 'none', '-');
         if (isComplete(updatedList)) {
           await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
@@ -3203,13 +3203,13 @@ async function handleCallbackInner(callback) {
     }
     if (code === 'status') {
       const rowData = await getRowData(session.row);
-      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+      const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
       await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
       return;
     }
     if (code === 'back') {
       const rowData = await getRowData(session.row);
-      const missing = getMissingDocs(rowData.AN, rowData.AF, rowData.AI);
+      const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
       await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
       return;
     }
@@ -3514,7 +3514,7 @@ async function runDocumentReminderTick() {
     if (!isReminderWindow) return;
 
     const reminderKey = `${dateKey}-${hour}`;
-    const rows = await readSheetRange(`${DRAFT_SHEET}!A2:AR2000`);
+    const rows = await readSheetRange(`${DRAFT_SHEET}!A2:AW2000`);
     if (!rows) return;
 
     for (let i = 0; i < rows.length; i++) {
@@ -3522,12 +3522,12 @@ async function runDocumentReminderTick() {
       if (!row) continue;
       const rowNum = i + 2;
       const status = row[1] || ''; // B
-      const contractId = row[3] || ''; // D
-      const missingCell = row[39] || ''; // AN
-      const fatherName = row[31] || ''; // AF
-      const motherName = row[34] || ''; // AI
-      const chatId = row[42] || ''; // AQ
-      const lastReminder = row[43] || ''; // AR
+      const contractId = row[7] || ''; // H (ID)
+      const missingCell = row[43] || ''; // AR (MISSING DOCS)
+      const fatherName = row[35] || ''; // AJ (FATHER'S NAME)
+      const motherName = row[38] || ''; // AM (MOTHER'S NAME)
+      const chatId = row[46] || ''; // AU (CHAT_ID)
+      const lastReminder = row[47] || ''; // AV (LAST_DOC_REMINDER)
 
       if (!contractId || !chatId) continue;
       // Eslatma faqat shu ikki holatda yuboriladi:
@@ -3542,7 +3542,7 @@ async function runDocumentReminderTick() {
       if (isComplete(missing)) continue; // hammasi topshirilgan
 
       await sendMessage(chatId, 'Eslatma: hujjatlaringiz hali to\'liq emas.\n\n' + buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
-      await updateCell(`${DRAFT_SHEET}!AR${rowNum}`, reminderKey);
+      await updateCell(`${DRAFT_SHEET}!AV${rowNum}`, reminderKey);
     }
   } catch (err) {
     console.error('Eslatma tick xatosi:', err);

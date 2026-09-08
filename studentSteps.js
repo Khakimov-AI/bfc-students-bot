@@ -139,7 +139,7 @@ const STUDENT_STEPS = {
       { text: 'Bor', value: 'BOR' },
       { text: 'Yo\'q', value: 'YOQ' },
     ],
-    sheetCol: 'AA', // ZAGRAN
+    sheetCol: 'AE', // ZAGRAN
     next: (data) => (data.zagran_status === 'BOR' ? 'passport_number' : 'full_name_warning'),
   },
   passport_number: {
@@ -148,7 +148,7 @@ const STUDENT_STEPS = {
     question: '3-savol: Chet elga chiqish (zagran) passport seriyasi va raqamini namunadagidek kiriting.\n\nNAMUNA: FB1234567',
     validate: validators.passport,
     errorMsg: 'Format noto\'g\'ri. 2 harf + 7 raqam, bo\'sh joysiz kiriting (masalan: FB1234567).',
-    sheetCol: 'N', // PASSPORT №
+    sheetCol: 'R', // PASSPORT №
     next: () => 'full_name_warning',
   },
 
@@ -176,7 +176,7 @@ const STUDENT_STEPS = {
       + '• Faqat lotin harflari (apostrof va kirill yozuv qabul qilinmaydi)\n'
       + '• Kamida 3 ta so\'z: familya + ism + otasining ismi\n\n'
       + 'NAMUNA: ABDULLAEV ADBULLAJON ABDULLAJON UGLI',
-    sheetCol: 'E', // FULL NAME
+    sheetCol: 'I', // FULL NAME
     next: () => 'phone',
   },
 
@@ -187,7 +187,7 @@ const STUDENT_STEPS = {
     question: 'Telefon raqamingizni kiriting.\n\nFaqat 9 ta raqam, bo\'sh joy va chiziqchasiz.\nNAMUNA: 901234567',
     validate: validators.phone,
     errorMsg: 'Faqat 9 ta raqam kiriting — bo\'sh joy, chiziqcha yoki qavs ishlatmang.\nNAMUNA: 901234567',
-    sheetCol: 'Q', // PHONE
+    sheetCol: 'U', // PHONE
     next: () => 'email',
   },
 
@@ -198,7 +198,7 @@ const STUDENT_STEPS = {
     question: 'Elektron pochta (gmail) manzilingizni kiriting:',
     validate: validators.email,
     errorMsg: 'Email formati noto\'g\'ri. Qayta kiriting.',
-    sheetCol: 'R', // E-MAIL
+    sheetCol: 'V', // E-MAIL
     next: () => 'dob',
   },
 
@@ -209,7 +209,7 @@ const STUDENT_STEPS = {
     question: 'Tug\'ilgan sanangizni YYYY.MM.DD formatida kiriting (masalan: 2005.03.21):',
     validate: validators.dob,
     errorMsg: 'Format noto\'g\'ri. YYYY.MM.DD ko\'rinishida kiriting.',
-    sheetCol: 'O', // DOB
+    sheetCol: 'S', // DOB
     next: () => 'gender',
   },
 
@@ -222,7 +222,7 @@ const STUDENT_STEPS = {
       { text: 'Erkak', value: 'ERKAK' },
       { text: 'Ayol', value: 'AYOL' },
     ],
-    sheetCol: 'P', // GENDER
+    sheetCol: 'T', // GENDER
     next: () => 'jshshir',
   },
 
@@ -233,7 +233,7 @@ const STUDENT_STEPS = {
     question: 'JSHSHIR raqamingizni kiriting (14 ta raqam):',
     validate: validators.jshshir,
     errorMsg: '14 ta raqamdan iborat bo\'lishi kerak. Qayta kiriting.',
-    sheetCol: 'AB', // JSHSHIR
+    sheetCol: 'AF', // JSHSHIR
     next: () => 'certificate_status',
   },
 
@@ -246,7 +246,7 @@ const STUDENT_STEPS = {
       { text: 'Bor', value: 'YES' },
       { text: 'Yo\'q', value: 'NO' },
     ],
-    sheetCol: 'I', // CERTIFICATE STATUS
+    sheetCol: 'M', // CERTIFICATE STATUS
     next: (data) => (data.certificate_status === 'YES' ? 'certificate_type' : 'no_cert_taker_choice'),
   },
   no_cert_taker_choice: {
@@ -272,7 +272,7 @@ const STUDENT_STEPS = {
       { text: 'TOEFL', value: 'TOEFL' },
       { text: 'SKA', value: 'SKA' },
     ],
-    sheetCol: 'J', // CERTIFICATE
+    sheetCol: 'N', // CERTIFICATE
     next: (data) => {
       const t = data.certificate_type;
       if (t === 'IELTS') return 'cert_score_ielts';
@@ -293,7 +293,7 @@ const STUDENT_STEPS = {
       { text: '7,5', value: '7.5' }, { text: '8,0', value: '8.0' },
       { text: '8,5', value: '8.5' }, { text: '9,0', value: '9.0' },
     ],
-    sheetCol: 'K', // SCORE
+    sheetCol: 'O', // SCORE
     next: () => 'asosiy_maqsad',
   },
   cert_score_topik: {
@@ -305,7 +305,7 @@ const STUDENT_STEPS = {
       { text: '4', value: '4' }, { text: '5', value: '5' },
       { text: '6', value: '6' },
     ],
-    sheetCol: 'K',
+    sheetCol: 'O',
     next: () => 'asosiy_maqsad',
   },
   cert_score_toefl: {
@@ -314,7 +314,7 @@ const STUDENT_STEPS = {
     question: 'Sertifikat ballingizni kiriting:',
     validate: validators.toeflScore,
     errorMsg: 'Talabadan o\'qishga topshirayotgan paytda eng past 71 balldan eng yuqori 120 ballgacha mezon qo\'yilgan. TOEFL ballingizni tekshirib qayta kiriting!',
-    sheetCol: 'K',
+    sheetCol: 'O',
     next: () => 'asosiy_maqsad',
   },
   cert_score_ska: {
@@ -323,7 +323,7 @@ const STUDENT_STEPS = {
     question: 'Sertifikat ballingizni kiriting:',
     validate: validators.skaScore,
     errorMsg: 'Talabadan o\'qishga topshirayotgan paytda eng past 201 balldan eng yuqori 800 ballgacha mezon qo\'yilgan. SKA ballingizni tekshirib qayta kiriting!',
-    sheetCol: 'K',
+    sheetCol: 'O',
     next: () => 'asosiy_maqsad',
   },
   certificate_type_taker: {
@@ -336,7 +336,7 @@ const STUDENT_STEPS = {
       { text: 'TOEFL', value: 'TOEFL' },
       { text: 'SKA', value: 'SKA' },
     ],
-    sheetCol: 'J', // CERTIFICATE
+    sheetCol: 'N', // CERTIFICATE
     next: (data) => (data.certificate_type_taker === 'TOPIK' ? 'test_report_number' : 'exam_date'),
   },
   test_report_number: {
@@ -344,7 +344,7 @@ const STUDENT_STEPS = {
     type: 'text',
     question: 'TOPIK test hisobot raqamini (Test Report Number) kiriting:',
     validate: validators.notEmpty,
-    sheetCol: 'AC', // TEST REPORT NUMBER
+    sheetCol: 'AG', // TEST REPORT NUMBER
     next: () => 'exam_date',
   },
   exam_date: {
@@ -360,7 +360,7 @@ const STUDENT_STEPS = {
       UNKNOWN: 'Taxminiy sana yoki izoh yozing (masalan: "2026 yil bahorida"):',
     },
     validate: validators.examDate,
-    sheetCol: 'AD', // EXAM DATE
+    sheetCol: 'AH', // EXAM DATE
     next: () => 'asosiy_maqsad',
   },
 
@@ -375,7 +375,7 @@ const STUDENT_STEPS = {
       { text: 'O\'qib ham ishlash', value: 'OQIB_ISHLASH' },
       { text: 'Ishlab o\'qish', value: 'ISHLAB_OQISH' },
     ],
-    sheetCol: 'AL', // ASOSIY MAQSAD
+    sheetCol: 'AP', // ASOSIY MAQSAD
     next: () => 'father_status',
   },
 
@@ -404,7 +404,7 @@ const STUDENT_STEPS = {
     type: 'text',
     question: 'Otangizning to\'liq ism-familyasini kiriting:',
     validate: validators.notEmpty,
-    sheetCol: 'AF', // FATHER'S NAME
+    sheetCol: 'AJ', // FATHER'S NAME
     next: () => 'father_job',
   },
   father_job: {
@@ -415,7 +415,7 @@ const STUDENT_STEPS = {
       ...JOB_OPTIONS.map((j) => ({ text: j, value: j })),
       { text: 'Boshqa (o\'zim yozaman)', value: 'OTHER' },
     ],
-    sheetCol: 'AH', // JOB (father)
+    sheetCol: 'AL', // JOB (father)
     next: (data) => (data.father_job === 'OTHER' ? 'father_job_custom' : 'father_phone'),
   },
   father_job_custom: {
@@ -424,7 +424,7 @@ const STUDENT_STEPS = {
     question: 'Otangizni kasbini kiriting:',
     validate: validators.job,
     errorMsg: 'Haqiqiy kasb kiriting',
-    sheetCol: 'AH',
+    sheetCol: 'AL',
     next: () => 'father_phone',
   },
   father_phone: {
@@ -433,7 +433,7 @@ const STUDENT_STEPS = {
     question: 'Otangizning telefon raqamini kiriting.\n\nFaqat 9 ta raqam, bo\'sh joysiz.\nNAMUNA: 901234567',
     validate: validators.phone,
     errorMsg: 'Faqat 9 ta raqam kiriting — bo\'sh joy, chiziqcha yoki qavs ishlatmang.\nNAMUNA: 901234567',
-    sheetCol: 'AG', // PHONE NUMBER (father)
+    sheetCol: 'AK', // PHONE NUMBER (father)
     next: () => 'mother_status',
   },
 
@@ -460,7 +460,7 @@ const STUDENT_STEPS = {
     type: 'text',
     question: 'Onangizning to\'liq ism-familyasini kiriting:',
     validate: validators.notEmpty,
-    sheetCol: 'AI', // MOTHER'S NAME
+    sheetCol: 'AM', // MOTHER'S NAME
     next: () => 'mother_job',
   },
   mother_job: {
@@ -471,7 +471,7 @@ const STUDENT_STEPS = {
       ...JOB_OPTIONS.map((j) => ({ text: j, value: j })),
       { text: 'Boshqa (o\'zim yozaman)', value: 'OTHER' },
     ],
-    sheetCol: 'AK', // JOB (mother)
+    sheetCol: 'AO', // JOB (mother)
     next: (data) => (data.mother_job === 'OTHER' ? 'mother_job_custom' : 'mother_phone'),
   },
   mother_job_custom: {
@@ -480,7 +480,7 @@ const STUDENT_STEPS = {
     question: 'Onangizni kasbini kiriting:',
     validate: validators.job,
     errorMsg: 'Haqiqiy kasb kiriting',
-    sheetCol: 'AK',
+    sheetCol: 'AO',
     next: () => 'mother_phone',
   },
   mother_phone: {
@@ -489,7 +489,7 @@ const STUDENT_STEPS = {
     question: 'Onangizning telefon raqamini kiriting.\n\nFaqat 9 ta raqam, bo\'sh joysiz.\nNAMUNA: 901234567',
     validate: validators.phone,
     errorMsg: 'Faqat 9 ta raqam kiriting — bo\'sh joy, chiziqcha yoki qavs ishlatmang.\nNAMUNA: 901234567',
-    sheetCol: 'AJ', // PHONE NUMBER (mother)
+    sheetCol: 'AN', // PHONE NUMBER (mother)
     next: () => 'address',
   },
 
@@ -502,7 +502,7 @@ const STUDENT_STEPS = {
     validate: validators.address,
     errorMsg: 'Manzil namunadagi tartibda, vergul bilan ajratib to\'liq kiritilishi kerak: '
       + 'Viloyat, tuman, ko\'cha, uy raqami.\n\nNAMUNA: Andijon, Andijon tumani, Qandolatchilar ko\'chasi 3',
-    sheetCol: 'S', // ADRESS
+    sheetCol: 'W', // ADRESS
     next: () => 'region',
   },
   region: {
@@ -510,7 +510,7 @@ const STUDENT_STEPS = {
     type: 'buttons',
     question: 'Qaysi viloyatdan ekanligingizni tanlang:',
     options: REGION_OPTIONS.map((r) => ({ text: r, value: r })),
-    sheetCol: 'Z', // REGION
+    sheetCol: 'AD', // REGION
     next: () => 'rejection_history',
   },
 
@@ -530,7 +530,7 @@ const STUDENT_STEPS = {
     type: 'text',
     question: 'Qaysi band bilan rad javobi olganingizni kiriting:',
     validate: validators.notEmpty,
-    sheetCol: 'AE', // REJECTION HISTORY
+    sheetCol: 'AI', // REJECTION HISTORY
     next: () => 'school_name',
   },
 
@@ -540,7 +540,7 @@ const STUDENT_STEPS = {
     type: 'text',
     question: 'Eng oxirgi bitirgan (yoki bitirayotgan) ta\'lim muassasasi nomini kiriting:',
     validate: validators.notEmpty,
-    sheetCol: 'V', // SCHOOL NAME
+    sheetCol: 'Z', // SCHOOL NAME
     next: () => 'graduating_this_year',
   },
   graduating_this_year: {
@@ -560,13 +560,13 @@ const STUDENT_STEPS = {
       ? 'Taxminiy bitirish sanangizni kiriting (YYYY.MM):'
       : 'Bitirgan sanangizni kiriting (YYYY.MM):',
     validate: validators.graduationDate,
-    sheetCol: 'X', // GRADUATION DATE
+    sheetCol: 'AB', // GRADUATION DATE
     next: (data) => (data.graduating_this_year === 'EXPECTED' ? 'gpa_expected' : 'gpa_known'),
   },
   gpa_expected: {
     label: 'GPA',
     type: 'skip', // avtomatik "EXPECTED" yoziladi, savol berilmaydi
-    sheetCol: 'Y', // GPA
+    sheetCol: 'AC', // GPA
     autoValue: 'EXPECTED',
     next: () => 'master_major_gate',
   },
@@ -575,7 +575,7 @@ const STUDENT_STEPS = {
     type: 'text',
     question: 'O\'rtacha bahoingiz (GPA)ni kiriting:',
     validate: validators.gpa,
-    sheetCol: 'Y', // GPA
+    sheetCol: 'AC', // GPA
     next: () => 'master_major_gate',
   },
 
@@ -597,7 +597,7 @@ const STUDENT_STEPS = {
     type: 'text',
     question: 'Bakalavr bosqichida qaysi sohani tugatganingizni kiriting:',
     validate: validators.notEmpty,
-    sheetCol: 'W', // MAJOR
+    sheetCol: 'AA', // MAJOR
     next: () => 'preferred_region',
   },
 
@@ -617,7 +617,7 @@ const STUDENT_STEPS = {
       { text: 'Gwangju (kichik) - 광주시', value: 'GWANGJU_CITY' },
       { text: 'Boshqa', value: 'OTHER' },
     ],
-    sheetCol: 'AM', // ASOSIY SHAHAR / PREFERRED_REGION
+    sheetCol: 'AQ', // ASOSIY SHAHAR / PREFERRED_REGION
     next: (data) => (data.preferred_region === 'OTHER' ? 'preferred_region_custom' : 'confirm'),
   },
   preferred_region_custom: {
@@ -625,7 +625,7 @@ const STUDENT_STEPS = {
     type: 'text',
     question: 'Koreyaning qaysi hududi (shahri) sizga qulayroq bo\'lishini yozib bering:',
     validate: validators.notEmpty,
-    sheetCol: 'AM',
+    sheetCol: 'AQ',
     next: () => 'confirm',
   },
 
@@ -665,7 +665,7 @@ function getStepOrder() {
   return Object.keys(STUDENT_STEPS);
 }
 
-const CURRENT_STEP_COLUMN = 'AP';
+const CURRENT_STEP_COLUMN = 'AT';
 const FIRST_STEP = 'program_selection';
 
 /**
