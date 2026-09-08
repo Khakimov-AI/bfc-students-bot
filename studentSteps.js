@@ -395,7 +395,7 @@ const STUDENT_STEPS = {
   // qiymat ("DEAD" yoki "DIVORCED") yoziladi, savol so'ralmaydi.
   father_skip_fill: {
     type: 'skip_multi',
-    sheetCols: ['AF', 'AG', 'AH'], // FATHER'S NAME, JOB, PHONE
+    sheetCols: ['AJ', 'AK', 'AL'], // FATHER'S NAME, PHONE, JOB
     autoValue: (data) => data.father_status,
     next: () => 'mother_status',
   },
@@ -451,7 +451,7 @@ const STUDENT_STEPS = {
   },
   mother_skip_fill: {
     type: 'skip_multi',
-    sheetCols: ['AI', 'AJ', 'AK'], // MOTHER'S NAME, JOB, PHONE
+    sheetCols: ['AM', 'AN', 'AO'], // MOTHER'S NAME, PHONE, JOB
     autoValue: (data) => data.mother_status,
     next: () => 'address',
   },

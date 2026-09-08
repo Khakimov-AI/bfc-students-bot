@@ -1310,16 +1310,16 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
     // Har bir maydon uchun: qaysi boshqa ustunlar bilan solishtiriladi
     const compareMap = {
       phone: [
-        { col: 'AG', label: 'otangizning raqami' },
-        { col: 'AJ', label: 'onangizning raqami' },
+        { col: 'AK', label: 'otangizning raqami' },
+        { col: 'AN', label: 'onangizning raqami' },
       ],
       father_phone: [
-        { col: 'Q', label: 'sizning raqamingiz' },
-        { col: 'AJ', label: 'onangizning raqami' },
+        { col: 'U', label: 'sizning raqamingiz' },
+        { col: 'AN', label: 'onangizning raqami' },
       ],
       mother_phone: [
-        { col: 'Q', label: 'sizning raqamingiz' },
-        { col: 'AG', label: 'otangizning raqami' },
+        { col: 'U', label: 'sizning raqamingiz' },
+        { col: 'AK', label: 'otangizning raqami' },
       ],
     };
 
