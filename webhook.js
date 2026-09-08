@@ -103,7 +103,7 @@ async function readSheetRange(range) {
  * kvota tugab, hujjat guruhga ketardi-yu, DOCUMENT_LOG'ga
  * yozilmasdan qolardi.
  */
-async function withRetry(fn, label, attempts = 4) {
+async function withRetry(fn, label, attempts = 3) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -113,8 +113,11 @@ async function withRetry(fn, label, attempts = 4) {
       const code = err && (err.code || (err.response && err.response.status));
       const retriable = code === 429 || code === 503 || code === 500 || code === 502;
       if (!retriable || i === attempts - 1) break;
-      // Kutish vaqti har urinishda ortadi: 1s, 2s, 4s
-      const waitMs = 1000 * Math.pow(2, i);
+      // Interaktiv so'rovlar uchun qisqaroq kutish: 500ms, 1000ms
+      // (avval 1s+2s+4s edi — bu talabani keraksiz uzoq kutdirardi).
+      // Fon vazifalari (eslatmalar) uchun qayta urinish keyingi
+      // scheduler tsiklida baribir sodir bo'ladi.
+      const waitMs = 500 * Math.pow(2, i);
       console.warn(`${label}: ${code} xatosi, ${waitMs}ms dan keyin qayta urinish (${i + 1}/${attempts})`);
       await new Promise((r) => setTimeout(r, waitMs));
     }
@@ -192,6 +195,30 @@ async function writeStepValue(rowNum, sheetCol, value) {
 
 async function writeCurrentStep(rowNum, stepKey) {
   await updateCell(`${DRAFT_SHEET}!${CURRENT_STEP_COLUMN}${rowNum}`, stepKey);
+}
+
+/**
+ * PERFORMANS: bitta qadam javobini yozganda odatda IKKITA yozuv kerak
+ * bo'ladi — javobning o'zi (masalan F.I.SH) va CURRENT_STEP ko'rsatkichi.
+ * Bu ikkalasini ALOHIDA-ALOHIDA emas, BITTA Google Sheets so'rovida
+ * (batchUpdate) yozish orqali har bir qadamdagi tarmoq so'rovlari sonini
+ * ikki barobar kamaytiramiz — bu botning "sekin javob berishi"ning
+ * asosiy sabablaridan biri edi (har bir savol ~3 ta ketma-ket Sheets
+ * so'rovi talab qilardi: o'qish + 2 ta yozish).
+ */
+async function writeValueAndStep(rowNum, sheetCol, value, stepKey) {
+  const data = [{ range: `${DRAFT_SHEET}!${CURRENT_STEP_COLUMN}${rowNum}`, values: [[stepKey]] }];
+  if (sheetCol) {
+    data.push({ range: `${DRAFT_SHEET}!${sheetCol}${rowNum}`, values: [[value]] });
+  }
+  return withRetry(async () => {
+    const client = await auth.getClient();
+    const sheets = google.sheets({ version: 'v4', auth: client });
+    return sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      resource: { valueInputOption: 'USER_ENTERED', data },
+    });
+  }, `writeValueAndStep(${sheetCol || '-'},${stepKey})`);
 }
 
 // ---------------------------------------------------------------------
@@ -1332,12 +1359,6 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
     }
   }
 
-  // "OTHER" — bu texnik qiymat (erkin matn so'rashga o'tish uchun),
-  // Sheet'ga yozilmaydi. Haqiqiy qiymat keyingi qadamda yoziladi.
-  if (trimmedValue !== 'OTHER') {
-    await writeStepValue(rowNum, step.sheetCol, trimmedValue);
-  }
-
   const sessionData = { [stepKey]: trimmedValue };
   const nextKey = step.next(sessionData);
 
@@ -1346,6 +1367,12 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
   // tozalanadi — aks holda yangi yo'l ularga tegmasa, eski qiymat
   // Sheet'da qolib ketadi.
   if (session.editing) {
+    // "OTHER" — bu texnik qiymat (erkin matn so'rashga o'tish uchun),
+    // Sheet'ga yozilmaydi. Haqiqiy qiymat keyingi qadamda yoziladi.
+    if (trimmedValue !== 'OTHER') {
+      await writeStepValue(rowNum, step.sheetCol, trimmedValue);
+    }
+
     const clearCols = EDIT_ROOT_CLEAR_COLS[stepKey];
     if (clearCols) {
       for (const col of clearCols) await writeStepValue(rowNum, col, '');
@@ -1364,7 +1391,12 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
     return renderStep(chatId, rowNum, nextKey, sessionData, true);
   }
 
-  await writeCurrentStep(rowNum, nextKey);
+  // ODDIY (tahrirlanmayotgan) YO'L — bu eng ko'p ishlatiladigan holat,
+  // ya'ni formani BIRINCHI marta to'ldirish. PERFORMANS UCHUN: javob
+  // qiymati va CURRENT_STEP ko'rsatkichi ALOHIDA emas, BITTA so'rovda
+  // (batchUpdate) yoziladi — bu har bir savol uchun Sheets'ga ketadigan
+  // tarmoq so'rovlari sonini kamaytirib, javob tezligini oshiradi.
+  await writeValueAndStep(rowNum, trimmedValue !== 'OTHER' ? step.sheetCol : null, trimmedValue, nextKey);
   await renderStep(chatId, rowNum, nextKey, sessionData);
 }
 
@@ -1426,39 +1458,47 @@ function getUpdateChatId(body) {
 // foydalanuvchi HECH QANDAY javob olmasdan qolardi.
 const CHAT_TASK_TIMEOUT_MS = 25000; // 25 soniya
 
-function withTimeout(promise, ms, label, onTimeout) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      console.error(`Navbat vaqti tugadi (${ms}ms): ${label} — keyingi so'rovga o'tildi.`);
-      if (onTimeout) { try { onTimeout(); } catch (e) { /* jim */ } }
-      resolve();
-    }, ms);
-    promise.then(() => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve();
-    }).catch((err) => {
-      if (settled) return;
-      settled = true;
+// MUHIM TUZATISH: avvalgi versiya timeout paytida navbatni "ochib
+// yuborardi" (resolve chaqirilardi) — lekin asl vazifa (Sheets so'rovi)
+// FONDA ishlashda davom etardi. Natijada, agar foydalanuvchi shu orada
+// qayta urinsa, ikkita mustaqil ijro bir-biriga aralashib, BIR XIL
+// savol IKKI MARTA chiqishi kabi xatolarga sabab bo'lardi.
+//
+// Endi: timeout faqat foydalanuvchiga BIR MARTA ogohlantirish yuboradi
+// ("so'rovingiz davom etmoqda, kuting"), lekin navbat ASL VAZIFA
+// haqiqatan tugagunicha OCHILMAYDI. Bu sekinlikni yashirmaydi (agar
+// Sheets sekin javob bersa, foydalanuvchi baribir kutadi), lekin
+// noto'g'ri, chalkash natijalarning oldini oladi.
+function withTimeout(promise, ms, label, onSlow) {
+  let notified = false;
+  const timer = setTimeout(() => {
+    if (notified) return;
+    notified = true;
+    console.error(`Sekin vazifa (${ms}ms dan oshdi): ${label} — hali kutilmoqda, bekor qilinmaydi.`);
+    if (onSlow) { try { onSlow(); } catch (e) { /* jim */ } }
+  }, ms);
+
+  return promise
+    .then((result) => { clearTimeout(timer); return result; })
+    .catch((err) => {
       clearTimeout(timer);
       console.error(`Navbatdagi vazifa xatosi (${label}):`, err);
-      resolve();
+      // Xatoni yutamiz (navbat davom etishi uchun), lekin logga yozamiz.
+      return undefined;
     });
-  });
 }
 
 async function enqueueForChat(chatId, task) {
   const prev = chatQueues.get(chatId) || Promise.resolve();
-  // Timeout ishga tushsa — foydalanuvchi JIM QOLMASIN, xabar beramiz.
-  const onTimeout = () => {
-    sendMessage(chatId, 'Kechirasiz, so\'rovingiz kutilganidan uzoq davom etdi. Iltimos, qayta urinib ko\'ring.')
+  // Sekin bo'lsa ham, foydalanuvchi JIM QOLMASIN — lekin "qayta urinib
+  // ko'ring" demaymiz, chunki bu ularni qayta urinishga undab, tizimga
+  // qo'shimcha yuk qo'shardi va aynan shu sabab ikki karra javoblarga
+  // olib kelardi. Endi shunchaki kutishni so'raymiz.
+  const onSlow = () => {
+    sendMessage(chatId, '⏳ So\'rovingiz biroz uzoq davom etmoqda, iltimos biroz kuting — qayta urinmang.')
       .catch(() => {});
   };
-  const runner = () => withTimeout(task(), CHAT_TASK_TIMEOUT_MS, `chat ${chatId}`, onTimeout);
+  const runner = () => withTimeout(task(), CHAT_TASK_TIMEOUT_MS, `chat ${chatId}`, onSlow);
   const next = prev.then(runner, runner);
   // Xotira sizib chiqmasligi uchun, navbat bo'sh bo'lgach tozalaymiz
   chatQueues.set(chatId, next.catch(() => {}));
