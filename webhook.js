@@ -178,6 +178,17 @@ async function findRowByContractId(contractId) {
  * aylantiradi.
  */
 async function getRowData(rowNum) {
+  // ILDIZ HIMOYA: agar rowNum noto'g'ri (undefined/null/0) bo'lsa,
+  // darhol ANIQ xato bilan to'xtaymiz — aks holda Sheets'ga
+  // "A undefined:AW undefined" kabi buzilgan diapazon yuborilib,
+  // tushunarsiz "Unable to parse range" xatosi chiqadi. Bu xato
+  // odatda sessiyada "row" saqlanmagan holatda (masalan talaba hali
+  // shartnoma ID kiritmasdan boshqa funksiya chaqirganda) yuz beradi.
+  if (!rowNum || typeof rowNum !== 'number') {
+    const err = new Error(`getRowData: yaroqsiz rowNum qiymati (${JSON.stringify(rowNum)}). Chaqiruvchi kodda session.row tekshirilmagan bo'lishi mumkin.`);
+    console.error(err.message, new Error().stack);
+    throw err;
+  }
   const range = `${DRAFT_SHEET}!A${rowNum}:AW${rowNum}`;
   const result = await readSheetRange(range);
   const row = (result && result[0]) || [];
@@ -1716,6 +1727,37 @@ async function processUpdate(body) {
     {
       const s = userStates.get(chatId) || {};
 
+      // ---- CHEKLOV: ma'lumot hali tasdiqlanmagan bo'lsa, faqat forma
+      // javoblari, "Yordam kerak" va "Tugmalarni yashirish" ishlaydi.
+      // Boshqa barcha funksiyalar (Hujjatlarim, Holatim, Savol-javob,
+      // Filiallar, Aloqa, Shikoyat, Qo'llanma, Qaytadan boshlash)
+      // faqat ma'lumot TASDIQLANGANDAN keyin (hujjat yuborish bosqichi
+      // boshlangach) ochiladi. Bu — talabalar hali forma to'ldirib
+      // ulgurmasdan boshqa tugmalarni bosib, chalkashib ketishining
+      // oldini oladi.
+      const RESTRICTED_UNTIL_CONFIRMED = new Set([
+        BTN.DOCS, BTN.STATUS, BTN.FAQ, BTN.BRANCHES, BTN.CONTACTS,
+        BTN.COMPLAINT, BTN.GUIDE, BTN.RESTART,
+      ]);
+      const isStaffUser = isAdmin(chatId) || isBoss(chatId) || isSupervisor(chatId);
+
+      if (!isStaffUser && RESTRICTED_UNTIL_CONFIRMED.has(text) && s.row) {
+        let confirmed = false;
+        try {
+          const rd = await getRowData(s.row);
+          confirmed = !!(rd.B && String(rd.B).trim());
+        } catch (e) { /* xato bo'lsa, xavfsizlik uchun cheklovni saqlaymiz */ }
+
+        if (!confirmed) {
+          await sendMessage(chatId,
+            '⚠️ Iltimos, avval ma\'lumotlaringizni TO\'LIQ kiriting va tasdiqlang.\n\n'
+            + 'Boshqa funksiyalar (hujjatlar, holat, savol-javob va h.k.) '
+            + 'ma\'lumotlaringiz tasdiqlangandan keyin, hujjat yuborish '
+            + 'bosqichida ochiladi.');
+          return;
+        }
+      }
+
       if (text === BTN.HIDE) {
         // Reply keyboard'ni yig'ish. Qaytarish uchun /menu yoki
         // xabar maydonining o'ng tomonidagi ⊞ belgisi.
@@ -1928,7 +1970,7 @@ async function processUpdate(body) {
       }
 
       // Oldingi rejimga qaytarish (forma davom etsin)
-      userStates.set(chatId, { ...session, mode: session.helpPrev || 'in_form' });
+      userStates.set(chatId, { ...session, mode: session.helpPrev || (session.row ? 'in_form' : 'awaiting_id') });
       await sendMessage(chatId, 'Savolingiz mas\'ul hodimimizga yuborildi. Tez orada siz bilan bog\'lanishadi.');
       return;
     }
@@ -2029,7 +2071,7 @@ async function processUpdate(body) {
         await sendMessage(supId, notice);
       }
 
-      userStates.set(chatId, { ...session, mode: session.complaintPrev || 'in_form' });
+      userStates.set(chatId, { ...session, mode: session.complaintPrev || (session.row ? 'in_form' : 'awaiting_id') });
       await sendMessage(chatId,
         'Murojaatingiz qabul qilindi. Rahbariyatimizga yetkazildi — albatta ko\'rib chiqamiz.',
         keyboardForUser(chatId));
