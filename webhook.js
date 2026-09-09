@@ -1540,6 +1540,76 @@ app.post('/webhook', (req, res) => {
   })();
 });
 
+/**
+ * Talaba faylni "to'g'ri" deb tasdiqlagandan keyin haqiqiy qabul
+ * qilish jarayoni: guruhga forward, jurnalga yozish, ro'yxatni
+ * yangilash.
+ */
+async function acceptDocumentUpload(chatId, session, fileId, fileType) {
+  const docCode = session.docCode;
+  const contractId = session.contractId;
+
+  const forwardResult = await sendDocumentToGroup(fileType, fileId, contractId, docCode);
+
+  if (!forwardResult || !forwardResult.ok) {
+    console.error(`Hujjat forward xatosi (${docCode}, shartnoma ${contractId}):`, forwardResult);
+    await sendMessage(chatId, 'Kechirasiz, hujjatni yuborishda texnik xatolik yuz berdi. Iltimos, qayta urinib ko\'ring yoki administratorga murojaat qiling.');
+    return;
+  }
+
+  try {
+    await logDocument(contractId, docCode, fileType, fileId);
+  } catch (logErr) {
+    console.error(`DOCUMENT_LOG YOZILMADI (${contractId}/${docCode}):`, logErr && logErr.message);
+    if (ADMIN_NOTIFY_CHAT_ID) {
+      await sendMessage(ADMIN_NOTIFY_CHAT_ID,
+        `⚠️ DIQQAT: hujjat guruhga yuborildi, lekin DOCUMENT_LOG'ga YOZILMADI.\n\n`
+        + `Shartnoma: ${contractId}\nHujjat: ${docCode}\nTuri: ${fileType}\n`
+        + `file_id: ${fileId}\n\n`
+        + `Iltimos, shu qatorni DOCUMENT_LOG sahifasiga qo'lda qo'shing.`);
+    }
+  }
+
+  try {
+    if (MULTI_UPLOAD_CODES.includes(docCode)) {
+      session.multiCount = (session.multiCount || 0) + 1;
+      userStates.set(chatId, session);
+      if (session.multiCount >= MULTI_UPLOAD_MAX) {
+        await sendMessage(chatId, `Qabul qilindi (${session.multiCount}/${MULTI_UPLOAD_MAX}). Chegaraga yetdingiz.`,
+          buildMoreFilesKeyboard(docCode));
+      } else {
+        await sendMessage(chatId, `Qabul qilindi (${session.multiCount}/${MULTI_UPLOAD_MAX}). Yana fayl yuborasizmi?`,
+          buildMoreFilesKeyboard(docCode));
+      }
+      return;
+    }
+
+    const markCode = PARENT_INCOME_CODES.includes(docCode) ? 'PARENT_INCOME' : docCode;
+
+    const rowData = await getRowData(session.row);
+    const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
+    const { updatedList, cellValue } = markDocReceived(missing, markCode);
+    await updateCell(`${DRAFT_SHEET}!AR${session.row}`, cellValue);
+
+    if (isComplete(updatedList)) {
+      await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
+      await sendFullDocumentSetToAdmin(contractId);
+      await sendMessage(chatId,
+        'Barcha hujjatlaringiz muvaffaqiyatli qabul qilindi!\n\n' +
+        'Hujjatlaringiz tez orada tekshirib chiqiladi. Agar xato yoki kamchilik bo\'lsa, ' +
+        'mas\'ul hodimimiz siz bilan bog\'lanadi.');
+    } else {
+      await sendMessage(chatId, 'Hujjat qabul qilindi.\n\n' + buildMissingDocsText(updatedList),
+        buildDocumentMenuKeyboard(updatedList));
+    }
+  } catch (sheetErr) {
+    console.error('Hujjat qabul qilingandan keyingi Sheets xatosi:', sheetErr);
+    await sendMessage(chatId,
+      'Hujjatingiz qabul qilindi, lekin ro\'yxatni yangilashda texnik nosozlik yuz berdi. ' +
+      'Hujjatlar holatini ko\'rish uchun /hujjatlar buyrug\'ini yuboring.');
+  }
+}
+
 async function processUpdate(body) {
   try {
     if (body.callback_query) {
@@ -2329,91 +2399,35 @@ async function processUpdate(body) {
     }
 
     // --- Fayl yuborilganda (hujjat rejimida) ---
+    // MUHIM: fayl DARHOL qabul qilinmaydi — avval talabaga "shu faylni
+    // [hujjat nomi] sifatida yubordingiz, to'g'rimi?" deb tasdiqlash
+    // so'raladi (fayl namunasini qaytarib ko'rsatib). Shunda talaba
+    // noto'g'ri tugma bosib, boshqa hujjat yuborib qo'yган bo'lsa,
+    // ADMIN ARALASHUVISIZ, DARHOL o'zi tuzata oladi.
     if ((message.document || message.photo) && session.mode === 'awaiting_document') {
       let fileId, fileType;
       if (message.document) { fileId = message.document.file_id; fileType = 'document'; }
       else { const photos = message.photo; fileId = photos[photos.length - 1].file_id; fileType = 'photo'; }
 
-      const docCode = session.docCode;
-      const contractId = session.contractId;
+      const doc = DOCUMENT_TYPES.find((d) => d.code === session.docCode);
+      const label = doc ? doc.label : session.docCode;
 
-      // Rejimni DARHOL qaytarish — agar quyida xato chiqsa ham,
-      // foydalanuvchi "hujjat kutilmoqda" holatida qotib qolmasin.
-      session.mode = 'in_form';
+      session.mode = 'awaiting_document_confirm';
+      session.pendingFile = { fileId, fileType };
       userStates.set(chatId, session);
 
-      const forwardResult = await sendDocumentToGroup(fileType, fileId, contractId, docCode);
-
-      if (!forwardResult || !forwardResult.ok) {
-        console.error(`Hujjat forward xatosi (${docCode}, shartnoma ${contractId}):`, forwardResult);
-        await sendMessage(chatId, 'Kechirasiz, hujjatni yuborishda texnik xatolik yuz berdi. Iltimos, qayta urinib ko\'ring yoki administratorga murojaat qiling.');
-        return;
-      }
-
-      // Sheets amallarini alohida try/catch ichida bajaramiz — bu yerda
-      // xato chiqsa (masalan API kvota limiti), foydalanuvchi baribir
-      // javob olishi kerak, jim qolmasligi kerak.
-      try {
-        await logDocument(contractId, docCode, fileType, fileId);
-      } catch (logErr) {
-        // JURNALGA YOZILMADI — bu jiddiy: fayl guruhga ketdi, lekin
-        // keyinchalik uni topib bo'lmaydi. Adminni darhol xabardor
-        // qilamiz, u qo'lda DOCUMENT_LOG'ga qo'sha oladi.
-        console.error(`DOCUMENT_LOG YOZILMADI (${contractId}/${docCode}):`, logErr && logErr.message);
-        if (ADMIN_NOTIFY_CHAT_ID) {
-          await sendMessage(ADMIN_NOTIFY_CHAT_ID,
-            `⚠️ DIQQAT: hujjat guruhga yuborildi, lekin DOCUMENT_LOG'ga YOZILMADI.\n\n`
-            + `Shartnoma: ${contractId}\nHujjat: ${docCode}\nTuri: ${fileType}\n`
-            + `file_id: ${fileId}\n\n`
-            + `Iltimos, shu qatorni DOCUMENT_LOG sahifasiga qo'lda qo'shing.`);
-        }
-      }
-
-      try {
-        // Ko'p faylli hujjat (masalan mashina texnik passporti) —
-        // "yana bormi?" so'raladi, ro'yxat hali yangilanmaydi.
-        if (MULTI_UPLOAD_CODES.includes(docCode)) {
-          session.multiCount = (session.multiCount || 0) + 1;
-          userStates.set(chatId, session);
-          if (session.multiCount >= MULTI_UPLOAD_MAX) {
-            await sendMessage(chatId, `Qabul qilindi (${session.multiCount}/${MULTI_UPLOAD_MAX}). Chegaraga yetdingiz.`,
-              buildMoreFilesKeyboard(docCode));
-          } else {
-            await sendMessage(chatId, `Qabul qilindi (${session.multiCount}/${MULTI_UPLOAD_MAX}). Yana fayl yuborasizmi?`,
-              buildMoreFilesKeyboard(docCode));
-          }
-          return;
-        }
-
-        // PARENT_INCOME ichidagi hujjatlar — ro'yxatda 'PARENT_INCOME'
-        // sifatida belgilanadi (ichki kodlar alohida sanalmaydi).
-        const markCode = PARENT_INCOME_CODES.includes(docCode) ? 'PARENT_INCOME' : docCode;
-
-        const rowData = await getRowData(session.row);
-        const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
-        const { updatedList, cellValue } = markDocReceived(missing, markCode);
-        await updateCell(`${DRAFT_SHEET}!AR${session.row}`, cellValue);
-
-        if (isComplete(updatedList)) {
-          await updateCell(`${DRAFT_SHEET}!B${session.row}`, "HUJJATLAR TO'LIQ");
-          await sendFullDocumentSetToAdmin(contractId);
-          await sendMessage(chatId,
-            'Barcha hujjatlaringiz muvaffaqiyatli qabul qilindi!\n\n' +
-            'Hujjatlaringiz tez orada tekshirib chiqiladi. Agar xato yoki kamchilik bo\'lsa, ' +
-            'mas\'ul hodimimiz siz bilan bog\'lanadi.');
-        } else {
-          await sendMessage(chatId, 'Hujjat qabul qilindi.\n\n' + buildMissingDocsText(updatedList),
-            buildDocumentMenuKeyboard(updatedList));
-        }
-      } catch (sheetErr) {
-        console.error('Hujjat qabul qilingandan keyingi Sheets xatosi:', sheetErr);
-        // Fayl guruhga BORDI — shuning uchun "qabul qilindi" deyish
-        // to'g'ri, faqat ro'yxat yangilanmagani aytiladi.
-        await sendMessage(chatId,
-          'Hujjatingiz qabul qilindi, lekin ro\'yxatni yangilashda texnik nosozlik yuz berdi. ' +
-          'Hujjatlar holatini ko\'rish uchun /hujjatlar buyrug\'ini yuboring.');
-      }
-
+      const method = fileType === 'document' ? 'sendDocument' : 'sendPhoto';
+      const field = fileType === 'document' ? 'document' : 'photo';
+      await telegramApi(method, {
+        chat_id: chatId, [field]: fileId,
+        caption: `Siz shu faylni "${label}" sifatida yubordingiz.\n\nTo'g'rimi?`,
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '✅ Ha, to\'g\'ri', callback_data: 'docconfirm:yes' },
+            { text: '❌ Yo\'q, xato yubordim', callback_data: 'docconfirm:no' },
+          ]],
+        },
+      });
       return;
     }
 
@@ -3246,6 +3260,46 @@ async function handleCallbackInner(callback) {
   }
 
   // --- Hujjat menyusi ---
+  // --- Hujjat yuklash tasdiqlash: "To'g'ri" / "Xato yubordim" ---
+  if (data.startsWith('docconfirm:')) {
+    const action = data.substring(11);
+
+    if (!session.pendingFile) {
+      answerCallbackQuery(callbackId, 'Bu so\'rov muddati o\'tgan.', true);
+      return;
+    }
+
+    if (action === 'yes') {
+      answerCallbackQuery(callbackId, '');
+      const { fileId, fileType } = session.pendingFile;
+      session.mode = 'in_form';
+      session.pendingFile = null;
+      userStates.set(chatId, session);
+      await acceptDocumentUpload(chatId, session, fileId, fileType);
+      return;
+    }
+
+    if (action === 'no') {
+      answerCallbackQuery(callbackId, '');
+      session.mode = 'in_form';
+      session.pendingFile = null;
+      userStates.set(chatId, session);
+      try {
+        const rowData = await getRowData(session.row);
+        const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
+        await sendMessage(chatId,
+          'Yaxshi, bekor qilindi. Hech narsa saqlanmadi.\n\n'
+          + 'Iltimos, to\'g\'ri faylni tanlab qayta yuboring:',
+          buildDocumentMenuKeyboard(missing));
+      } catch (e) {
+        console.error('docconfirm:no xatosi:', e);
+        await sendMessage(chatId, 'Bekor qilindi. /hujjatlar buyrug\'ini qayta yuboring.');
+      }
+      return;
+    }
+    return;
+  }
+
   if (data.startsWith('doc:')) {
     const code = data.substring(4);
     answerCallbackQuery(callbackId, '');
