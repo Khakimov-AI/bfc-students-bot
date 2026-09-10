@@ -275,6 +275,7 @@ function canEditFaq(chatId) {
   return isSupervisor(chatId) || isAdmin(chatId) || isBoss(chatId);
 }
 const WELCOME_VIDEO_FILE_ID = process.env.WELCOME_VIDEO_FILE_ID; // /setvideo orqali olinadi
+const GUIDE_VIDEO_FILE_ID = process.env.GUIDE_VIDEO_FILE_ID; // botdan qanday foydalanish bo'yicha qo'llanma video
 
 async function sendFullDocumentSetToAdmin(contractId) {
   if (!ADMIN_NOTIFY_CHAT_ID) {
@@ -292,12 +293,15 @@ async function sendFullDocumentSetToAdmin(contractId) {
 // Yangi talabaga tanishtiruv videosini yuboradi. Video hali
 // sozlanmagan bo'lsa (WELCOME_VIDEO_FILE_ID yo'q), jim o'tkazib
 // yuboriladi (talaba formasini davom ettirishga to'sqinlik qilmaydi).
-async function sendWelcomeVideo(chatId) {
-  if (!WELCOME_VIDEO_FILE_ID) {
-    console.error('WELCOME_VIDEO_FILE_ID o\'rnatilmagan — video yuborilmadi.');
+async function sendVideoWithButton(chatId, fileId, caption, buttonText, callbackData) {
+  if (!fileId) {
+    console.error('Video file_id sozlanmagan — video yuborilmadi.');
     return;
   }
-  const payload = { chat_id: chatId, video: WELCOME_VIDEO_FILE_ID, caption: 'Videoni to\'liq ko\'rib chiqing!' };
+  const payload = {
+    chat_id: chatId, video: fileId, caption,
+    reply_markup: buttonText ? { inline_keyboard: [[{ text: buttonText, callback_data: callbackData }]] } : undefined,
+  };
   const data = JSON.stringify(payload);
   const options = {
     hostname: 'api.telegram.org',
@@ -2439,6 +2443,17 @@ async function processUpdate(body) {
       return;
     }
 
+    // --- Video tasdiqlash bosqichlarida talaba matn yozsa —
+    // tugmani bosishini eslatamiz (video hali to'liq ko'rilmagan) ---
+    if (session.mode === 'awaiting_onboarding_ack' || session.mode === 'awaiting_guide_ack') {
+      await sendMessage(chatId, 'Iltimos, avval videoni to\'liq ko\'rib chiqib, "✅ Videoni ko\'rib chiqdim" tugmasini bosing.');
+      return;
+    }
+    if (session.mode === 'awaiting_ready_ack') {
+      await sendMessage(chatId, 'Iltimos, "Tayyorman" tugmasini bosing.');
+      return;
+    }
+
     // --- Shartnoma ID tekshiruvi + XAVFSIZLIK NAZORATI ---
     if (session.mode === 'awaiting_id') {
       const rowNum = await findRowByContractId(text);
@@ -2471,15 +2486,26 @@ async function processUpdate(body) {
       }
 
       const stepKey = findResumeStep(rowData);
-      userStates.set(chatId, { mode: 'in_form', row: rowNum, contractId: text.trim().toUpperCase(), editing: false });
+      const contractIdUpper = text.trim().toUpperCase();
 
-      // Faqat BIRINCHI marta kirganda (forma hali boshlanmagan) —
-      // tabrik xati + tanishtiruv video yuboriladi.
+      // BIRINCHI marta kirgan talaba — avval ikkita video (tanishtiruv
+      // + qo'llanma) ko'rsatiladi, har biridan keyin talaba "ko'rib
+      // chiqdim" deb tasdiqlashi kerak. Forma savollari FAQAT ikkala
+      // video ham tasdiqlangandan keyin boshlanadi.
       if (stepKey === FIRST_STEP) {
+        userStates.set(chatId, {
+          mode: 'awaiting_onboarding_ack',
+          row: rowNum, contractId: contractIdUpper, stepKey, editing: false,
+        });
         await sendMessage(chatId, 'Siz bizning kompaniyamiz bilan keyingi bosqichga o\'tganingiz bilan tabriklayman! 🎉');
-        await sendWelcomeVideo(chatId);
+        await sendVideoWithButton(chatId, WELCOME_VIDEO_FILE_ID, 'Videoni to\'liq ko\'rib chiqing!',
+          '✅ Videoni ko\'rib chiqdim', 'onboardingack:seen');
+        return;
       }
 
+      // QAYTGAN talaba (forma allaqachon boshlangan) — video ko'rsatilmaydi,
+      // to'g'ridan-to'g'ri davom etadi.
+      userStates.set(chatId, { mode: 'in_form', row: rowNum, contractId: contractIdUpper, editing: false });
       await sendMessage(chatId,
         'Shartnomangiz muvaffaqiyatli tasdiqlandi. Endi esa hujjatlaringiz bo\u2018yicha '
         + 'ma\u2019lumotlarni kiritish va keyingi jarayonlarni boshlashga kirishamiz. \ud83d\udcd1\n\n'
@@ -3285,6 +3311,61 @@ async function handleCallbackInner(callback) {
 
   if (!session) {
     answerCallbackQuery(callbackId, 'Sessiya topilmadi, /start bosing.');
+    return;
+  }
+
+  // --- Onboarding video ko'rib chiqildi — endi qo'llanma video ---
+  if (data === 'onboardingack:seen') {
+    if (session.mode !== 'awaiting_onboarding_ack') {
+      answerCallbackQuery(callbackId, 'Bu tugma muddati o\'tgan.', true);
+      return;
+    }
+    answerCallbackQuery(callbackId, '');
+    session.mode = 'awaiting_guide_ack';
+    userStates.set(chatId, session);
+    await sendMessage(chatId,
+      'Bu video qo\'llanmada botdan qanday qilib to\'g\'ri va aniq foydalanish '
+      + 'ko\'rsatilgan. Videoni to\'liq ko\'rib chiqishingizni so\'raymiz.');
+    await sendVideoWithButton(chatId, GUIDE_VIDEO_FILE_ID, null,
+      '✅ Videoni ko\'rib chiqdim', 'guideack:seen');
+    return;
+  }
+
+  // --- Qo'llanma video ko'rib chiqildi — yakuniy tayyorlik so'raladi ---
+  if (data === 'guideack:seen') {
+    if (session.mode !== 'awaiting_guide_ack') {
+      answerCallbackQuery(callbackId, 'Bu tugma muddati o\'tgan.', true);
+      return;
+    }
+    answerCallbackQuery(callbackId, '');
+    session.mode = 'awaiting_ready_ack';
+    userStates.set(chatId, session);
+    await sendMessage(chatId,
+      'Videolarni ko\'rib chiqdingizmi, biz bilan birinchi qadamingizni boshlashga tayyormisiz?',
+      { inline_keyboard: [[{ text: 'Tayyorman', callback_data: 'readyack:go' }]] });
+    return;
+  }
+
+  // --- Talaba tayyor — forma boshlanadi ---
+  if (data === 'readyack:go') {
+    if (session.mode !== 'awaiting_ready_ack') {
+      answerCallbackQuery(callbackId, 'Bu tugma muddati o\'tgan.', true);
+      return;
+    }
+    answerCallbackQuery(callbackId, '');
+    const { row: rowNum, contractId, stepKey } = session;
+    userStates.set(chatId, { mode: 'in_form', row: rowNum, contractId, editing: false });
+    await sendMessage(chatId,
+      'Shartnomangiz muvaffaqiyatli tasdiqlandi. Endi esa hujjatlaringiz bo\u2018yicha '
+      + 'ma\u2019lumotlarni kiritish va keyingi jarayonlarni boshlashga kirishamiz. \ud83d\udcd1\n\n'
+      + 'Keyingi bosqichlarda taqdim qiladigan ma\'lumotlaringiz va hujjatlaringiz '
+      + 'universitetga topshirish bosqichi va elchixonadan viza olish bosqichlarida '
+      + 'foydalaniladi, shuning uchun ma\'lumotlaringizni to\'g\'ri taqdim qilishingiz '
+      + 'muhim ahamiyat kasb etadi.\n\n'
+      + 'ESLATMA: Noto\'g\'ri taqdim qilgan ma\'lumotlar salbiy natijalarga olib kelishi '
+      + 'mumkin. Iltimos e\'tiborli bo\'ling\u2757\ufe0f',
+      keyboardForUser(chatId));
+    await renderStep(chatId, rowNum, stepKey, {});
     return;
   }
 
