@@ -299,9 +299,14 @@ async function sendVideoWithButton(chatId, fileId, caption, buttonText, callback
     return;
   }
   const payload = {
-    chat_id: chatId, video: fileId, caption,
+    chat_id: chatId, video: fileId,
     reply_markup: buttonText ? { inline_keyboard: [[{ text: buttonText, callback_data: callbackData }]] } : undefined,
   };
+  // MUHIM: caption kaliti faqat haqiqiy matn bo'lsagina qo'shiladi.
+  // Avval `caption: null` yuborilardi — bu Telegram API'da videoning
+  // captioni sifatida so'zma-so'z "null" matni ko'rinishiga sabab
+  // bo'lgan edi.
+  if (caption) payload.caption = caption;
   const data = JSON.stringify(payload);
   const options = {
     hostname: 'api.telegram.org',
@@ -2023,7 +2028,13 @@ async function processUpdate(body) {
 
       if (text === BTN.RESTART) {
         userStates.set(chatId, { mode: 'awaiting_id' });
-        await sendMessage(chatId, 'Shartnoma raqamingizni kiriting:', keyboardForUser(chatId));
+        await sendMessage(chatId,
+          'Assalom alaykum hurmatli mijoz sizni Bright Future kompaniyasi bilan '
+          + 'shartnoma imzolaganingiz bilan tabriklaymiz! 🎉 '
+          + 'Bu — katta maqsad sari tashlangan muhim qadam. 🎓\n\n'
+          + 'Ma\'lumotlaringizni taqdim qilshni boshlash uchun biz bilan qilgan '
+          + 'shartnoma raqamingizni kiriting:',
+          keyboardForUser(chatId));
         return;
       }
 
@@ -3323,10 +3334,9 @@ async function handleCallbackInner(callback) {
     answerCallbackQuery(callbackId, '');
     session.mode = 'awaiting_guide_ack';
     userStates.set(chatId, session);
-    await sendMessage(chatId,
+    await sendVideoWithButton(chatId, GUIDE_VIDEO_FILE_ID,
       'Bu video qo\'llanmada botdan qanday qilib to\'g\'ri va aniq foydalanish '
-      + 'ko\'rsatilgan. Videoni to\'liq ko\'rib chiqishingizni so\'raymiz.');
-    await sendVideoWithButton(chatId, GUIDE_VIDEO_FILE_ID, null,
+      + 'ko\'rsatilgan. Videoni to\'liq ko\'rib chiqishingizni so\'raymiz.',
       '✅ Videoni ko\'rib chiqdim', 'guideack:seen');
     return;
   }
