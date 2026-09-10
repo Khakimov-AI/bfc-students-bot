@@ -881,6 +881,7 @@ const ADMIN_COMMANDS = [
   { command: 'xulosa', description: 'Kunlik xulosa' },
   { command: 'namuna', description: 'Hujjat namunasi/talabini sozlash' },
   { command: 'savolnamuna', description: 'Forma savoliga namuna rasm biriktirish' },
+  { command: 'savolnamuna_royxat', description: 'Namunali savollarni korish/ozgartirish' },
   { command: 'qollanma', description: 'Funksiyalar bo\'yicha yo\'riqnoma' },
   { command: 'menu', description: 'Tugmalarni qayta ko\'rsatish' },
 ];
@@ -1793,11 +1794,44 @@ async function processUpdate(body) {
       }
       // Faqat matn kiritiladigan (text) savollar ro'yxatga olinadi —
       // bular talaba noto'g'ri formatda javob berishi mumkin bo'lgan
-      // joylar (ism, sana, passport raqami va h.k.).
+      // joylar (ism, sana, passport raqami va h.k.). Allaqachon
+      // namuna biriktirilgan savollar ro'yxatdan OLIB TASHLANADI —
+      // aks holda ro'yxat cheksiz o'sib, qaysi savol hali
+      // sozlanmaganini topish qiyinlashardi.
+      const existingSamples = await getFormSamples();
       const textSteps = Object.entries(STUDENT_STEPS)
-        .filter(([, s]) => s.type === 'text' && s.label);
+        .filter(([key, s]) => s.type === 'text' && s.label && !existingSamples[key]);
+
+      if (textSteps.length === 0) {
+        await sendMessage(chatId, 'Barcha savollarga namuna biriktirilgan ✅\n\nO\'zgartirish uchun /savolnamuna_royxat buyrug\'idan foydalaning.');
+        return;
+      }
+
       const rows = textSteps.map(([key, s]) => [{ text: s.label, callback_data: `stepsmpl:${key}` }]);
-      await sendMessage(chatId, 'Qaysi savol uchun namuna rasm biriktirasiz?', { inline_keyboard: rows });
+      await sendMessage(chatId,
+        `Qaysi savol uchun namuna rasm biriktirasiz?\n\n(${Object.keys(existingSamples).length} ta savolga allaqachon biriktirilgan, ular ro'yxatda ko'rsatilmayapti)`,
+        { inline_keyboard: rows });
+      return;
+    }
+
+    // --- /savolnamuna_royxat: allaqachon namuna biriktirilgan
+    // savollarni ko'rish va xohlasa qayta sozlash uchun ---
+    if (text === '/savolnamuna_royxat') {
+      if (!canEditFaq(chatId)) {
+        await sendMessage(chatId, 'Bu funksiya faqat supervisorlar uchun.');
+        return;
+      }
+      const existingSamples = await getFormSamples();
+      const keys = Object.keys(existingSamples);
+      if (keys.length === 0) {
+        await sendMessage(chatId, 'Hozircha hech qanday savolga namuna biriktirilmagan.');
+        return;
+      }
+      const rows = keys.map((key) => {
+        const stepDef = STUDENT_STEPS[key];
+        return [{ text: `♻️ ${stepDef ? stepDef.label : key}`, callback_data: `stepsmpl:${key}` }];
+      });
+      await sendMessage(chatId, 'Namuna biriktirilgan savollar (qayta sozlash uchun tanlang):', { inline_keyboard: rows });
       return;
     }
 
@@ -1838,8 +1872,9 @@ async function processUpdate(body) {
 
     // --- Video yuborilsa, uning file_id'sini qaytaradi (WELCOME_VIDEO_FILE_ID
     // sozlash uchun — video shaxsiy chatga bir marta yuboriladi, chiqqan
-    // ID Coolify environment variable'ga qo'yiladi) ---
-    if (message.video) {
+    // ID Coolify environment variable'ga qo'yiladi). Faqat hodimlar
+    // uchun — aks holda talaba tasodifan video yuborsa chalkashadi.
+    if (message.video && canEditFaq(chatId)) {
       await sendMessage(chatId, `Video file_id:\n${message.video.file_id}\n\nBuni WELCOME_VIDEO_FILE_ID environment variable sifatida saqlang.`);
       return;
     }
