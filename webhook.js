@@ -42,6 +42,7 @@ const BRANCHES_SHEET = 'LOCATION';  // A:BRANCH NAME B:ADRESS C:LATITUDE D:LONGI
 const CONTACTS_SHEET = 'CONTACTS';  // A:NAME B:POSITION C:PHONE
 const COMPLAINTS_SHEET = 'COMPLAINTS'; // A:№ B:DATE C:ID D:NAME E:USERNAME F:MATN
 const DOC_SAMPLES_SHEET = 'DOC_SAMPLES'; // A:KOD B:TALAB/TAVSIF C:NAMUNA_FILE_ID D:TUR
+const FORM_SAMPLES_SHEET = 'FORM_SAMPLES'; // A:STEP_KEY B:FILE_ID C:TUR — forma savoli namunasi (masalan zagran passport)
 const DOC_GUIDE_SHEET = 'DOC_GUIDE';   // A:№ B:DOC_CODE C:TALAB D:NAMUNA_FILE_ID E:NAMUNA_TURI // A:timestamp B:contractId C:docCode D:fileType E:fileId
 
 const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
@@ -878,6 +879,8 @@ const ADMIN_COMMANDS = [
   { command: 'viza', description: 'Talabani viza bosqichiga o\'tkazish' },
   { command: 'hisobot', description: 'To\'liq analitik hisobot' },
   { command: 'xulosa', description: 'Kunlik xulosa' },
+  { command: 'namuna', description: 'Hujjat namunasi/talabini sozlash' },
+  { command: 'savolnamuna', description: 'Forma savoliga namuna rasm biriktirish' },
   { command: 'qollanma', description: 'Funksiyalar bo\'yicha yo\'riqnoma' },
   { command: 'menu', description: 'Tugmalarni qayta ko\'rsatish' },
 ];
@@ -1131,6 +1134,54 @@ async function getDocSamples() {
 }
 
 /**
+ * Forma savollari uchun namunalar (masalan: "Zagran passportda ism
+ * qayerda yozilgan" degan rasmni ko'rsatish). STUDENT_STEPS kaliti
+ * (masalan 'full_name') bo'yicha saqlanadi.
+ */
+async function getFormSamples() {
+  const rows = await readSheetRange(`${FORM_SAMPLES_SHEET}!A2:C100`) || [];
+  const map = {};
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !String(r[0] || '').trim()) continue;
+    map[String(r[0]).trim()] = {
+      row: i + 2,
+      fileId: String(r[1] || '').trim(),
+      fileType: String(r[2] || 'photo').trim().toLowerCase(),
+    };
+  }
+  return map;
+}
+
+async function saveFormSample(stepKey, fileId, fileType) {
+  const samples = await getFormSamples();
+  const existing = samples[stepKey];
+  if (existing) {
+    await updateCell(`${FORM_SAMPLES_SHEET}!B${existing.row}`, fileId);
+    await updateCell(`${FORM_SAMPLES_SHEET}!C${existing.row}`, fileType);
+  } else {
+    await appendRow(`${FORM_SAMPLES_SHEET}!A:C`, [stepKey, fileId, fileType]);
+  }
+}
+
+/**
+ * Savol matnidan OLDIN, agar shu step uchun namuna fayl belgilangan
+ * bo'lsa, uni yuboradi (masalan zagran passportdagi ism namunasi).
+ */
+async function sendFormSampleIfAny(chatId, stepKey) {
+  try {
+    const samples = await getFormSamples();
+    const s = samples[stepKey];
+    if (!s || !s.fileId) return;
+    const method = s.fileType === 'document' ? 'sendDocument' : 'sendPhoto';
+    const field = s.fileType === 'document' ? 'document' : 'photo';
+    await telegramApi(method, { chat_id: chatId, [field]: s.fileId, caption: 'NAMUNA' });
+  } catch (e) {
+    console.error('sendFormSampleIfAny xatosi:', e && e.message);
+  }
+}
+
+/**
  * Hujjat so'rashdan OLDIN talabga qo'yiladigan talablar va namunani
  * yuboradi. Sheet'da ma'lumot bo'lmasa, umumiy talablar ko'rsatiladi.
  */
@@ -1316,6 +1367,11 @@ async function renderStep(chatId, rowNum, stepKey, sessionData, isEditingChain) 
   }
 
   const questionText = typeof step.question === 'function' ? step.question(sessionData) : step.question;
+
+  // Agar shu savol uchun namuna fayl belgilangan bo'lsa (masalan
+  // "Zagran passportda ism qayerda yozilgan"), savol matnidan OLDIN
+  // yuboriladi — talaba avval rasmni ko'radi, keyin savolni o'qiydi.
+  await sendFormSampleIfAny(chatId, stepKey);
 
   if (step.type === 'buttons' || step.type === 'buttons_then_text') {
     await sendMessage(chatId, questionText, buildStepKeyboard(step));
@@ -1725,6 +1781,23 @@ async function processUpdate(body) {
       }
       const rows = DOCUMENT_TYPES.map((d) => [{ text: d.label, callback_data: `smpl:${d.code}` }]);
       await sendMessage(chatId, 'Qaysi hujjat uchun namuna/talab sozlaysiz?', { inline_keyboard: rows });
+      return;
+    }
+
+    // --- /savolnamuna: FORMA SAVOLIGA namuna biriktirish (masalan
+    // "Zagran passportda ism qayerda yozilgan" rasmi) ---
+    if (text === '/savolnamuna') {
+      if (!canEditFaq(chatId)) {
+        await sendMessage(chatId, 'Bu funksiya faqat supervisorlar uchun.');
+        return;
+      }
+      // Faqat matn kiritiladigan (text) savollar ro'yxatga olinadi —
+      // bular talaba noto'g'ri formatda javob berishi mumkin bo'lgan
+      // joylar (ism, sana, passport raqami va h.k.).
+      const textSteps = Object.entries(STUDENT_STEPS)
+        .filter(([, s]) => s.type === 'text' && s.label);
+      const rows = textSteps.map(([key, s]) => [{ text: s.label, callback_data: `stepsmpl:${key}` }]);
+      await sendMessage(chatId, 'Qaysi savol uchun namuna rasm biriktirasiz?', { inline_keyboard: rows });
       return;
     }
 
@@ -2214,6 +2287,26 @@ async function processUpdate(body) {
       if (message.document) { fid = message.document.file_id; ftype = 'document'; }
       else { fid = message.photo[message.photo.length - 1].file_id; ftype = 'photo'; }
       await saveDocSample(chatId, session, fid, ftype);
+      return;
+    }
+
+    // --- Forma savoli namunasi: rasm kelmoqda ---
+    if (session && session.mode === 'stepsample_awaiting_photo' && (message.photo || message.document)) {
+      let fid, ftype;
+      if (message.document) { fid = message.document.file_id; ftype = 'document'; }
+      else { fid = message.photo[message.photo.length - 1].file_id; ftype = 'photo'; }
+      try {
+        await saveFormSample(session.stepSampleKey, fid, ftype);
+        const stepDef = STUDENT_STEPS[session.stepSampleKey];
+        await sendMessage(chatId,
+          `"${stepDef ? stepDef.label : session.stepSampleKey}" savoli uchun namuna saqlandi ✅\n\n`
+          + 'Endi talabalar shu savolga yetganda avval ushbu rasmni ko\'radi.',
+          keyboardForUser(chatId));
+      } catch (e) {
+        console.error('saveFormSample xatosi:', e);
+        await sendMessage(chatId, 'Saqlashda xatolik: ' + e.message);
+      }
+      userStates.set(chatId, { ...session, mode: null, stepSampleKey: null });
       return;
     }
 
@@ -2894,6 +2987,21 @@ async function handleCallbackInner(callback) {
       + 'Aniq va sodda yozing.\n\n'
       + 'Misol:\n"Passportning ma\'lumot sahifasini to\'liq suratga oling. '
       + 'Barcha 4 ta cheti ko\'rinsin, raqamlar aniq o\'qilsin, yorug\'lik yetarli bo\'lsin."');
+    return;
+  }
+
+  // --- Forma savoli namunasi: savol tanlandi, rasm kutilmoqda ---
+  if (data.startsWith('stepsmpl:')) {
+    if (!canEditFaq(chatId)) { answerCallbackQuery(callbackId, 'Ruxsat yo\'q.'); return; }
+    const stepKey = data.substring(9);
+    const s = userStates.get(chatId) || {};
+    userStates.set(chatId, { ...s, mode: 'stepsample_awaiting_photo', stepSampleKey: stepKey });
+    answerCallbackQuery(callbackId, '');
+    const stepDef = STUDENT_STEPS[stepKey];
+    await sendMessage(chatId,
+      `"${stepDef ? stepDef.label : stepKey}" savoli uchun NAMUNA rasm yuboring.\n\n`
+      + 'Bu rasm talaba shu savolni ko\'rishidan OLDIN yuboriladi (masalan, '
+      + 'zagran passportdagi ism-familya joyi belgilab ko\'rsatilgan rasm).');
     return;
   }
 
