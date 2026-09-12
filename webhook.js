@@ -104,21 +104,50 @@ async function readSheetRange(range) {
  * kvota tugab, hujjat guruhga ketardi-yu, DOCUMENT_LOG'ga
  * yozilmasdan qolardi.
  */
+// =====================================================================
+// YOZISH TEZLIGINI OLDINDAN CHEKLASH (proaktiv rate-limit)
+// Google Sheets API standart kvotasi: bitta xizmat hisobi uchun
+// daqiqasiga ~60 ta YOZISH so'rovi. Ko'p talaba bir vaqtda forma
+// to'ldirsa, bu limitga tez yetib borishi mumkin. Xatoga uchragandan
+// keyin qayta urinish o'rniga, biz OLDINDAN o'z yozish tezligimizni
+// xavfsiz chegaradan (45/daqiqa) pastda ushlab turamiz — bu kvota
+// xatosining o'zini kamaytiradi.
+// =====================================================================
+const WRITE_RATE_LIMIT = 45;
+const WRITE_WINDOW_MS = 60000;
+const writeTimestamps = [];
+
+async function throttleWrite() {
+  for (;;) {
+    const now = Date.now();
+    while (writeTimestamps.length && now - writeTimestamps[0] > WRITE_WINDOW_MS) {
+      writeTimestamps.shift();
+    }
+    if (writeTimestamps.length < WRITE_RATE_LIMIT) {
+      writeTimestamps.push(now);
+      return;
+    }
+    const waitMs = Math.max(WRITE_WINDOW_MS - (now - writeTimestamps[0]) + 50, 50);
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+}
+
 async function withRetry(fn, label, attempts = 3) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
+      await throttleWrite();
       return await fn();
     } catch (err) {
       lastErr = err;
       const code = err && (err.code || (err.response && err.response.status));
       const retriable = code === 429 || code === 503 || code === 500 || code === 502;
       if (!retriable || i === attempts - 1) break;
-      // Interaktiv so'rovlar uchun qisqaroq kutish: 500ms, 1000ms
-      // (avval 1s+2s+4s edi — bu talabani keraksiz uzoq kutdirardi).
-      // Fon vazifalari (eslatmalar) uchun qayta urinish keyingi
-      // scheduler tsiklida baribir sodir bo'ladi.
-      const waitMs = 500 * Math.pow(2, i);
+
+      // MUHIM: 429 (kvota) — bu DAQIQALIK limit, shuning uchun
+      // millisekundlik kutish foydasiz. Haqiqiy kutish kerak.
+      // 500/502/503 esa vaqtinchalik server xatosi — tez tuzaladi.
+      const waitMs = code === 429 ? 4000 * (i + 1) : 500 * Math.pow(2, i);
       console.warn(`${label}: ${code} xatosi, ${waitMs}ms dan keyin qayta urinish (${i + 1}/${attempts})`);
       await new Promise((r) => setTimeout(r, waitMs));
     }
