@@ -41,6 +41,13 @@ const FAQ_SHEET = 'FAQ';            // A:№ B:SAVOL C:JAVOB D:KIM KIRITDI
 const BRANCHES_SHEET = 'LOCATION';  // A:BRANCH NAME B:ADRESS C:LATITUDE D:LONGITUDE
 const CONTACTS_SHEET = 'CONTACTS';  // A:NAME B:POSITION C:PHONE
 const COMPLAINTS_SHEET = 'COMPLAINTS'; // A:№ B:DATE C:ID D:NAME E:USERNAME F:MATN
+const ZIP_ARCHIVE_SHEET = 'ZIP_ARCHIVE'; // A:CONTRACT_ID B:FILE_ID C:FILE_NAME D:SANA E:KIM_YUKLADI
+
+// "Hujjat arxiv" topic — talabaning to'liq hujjatlar to'plami (ZIP)
+// shu topic'ga saqlanadi. Agar sozlanmasa, "Supervisors" guruhining
+// o'zi ishlatiladi (DOCUMENT_GROUP_CHAT_ID), faqat topic ID beriladi.
+const ARCHIVE_GROUP_CHAT_ID = process.env.ARCHIVE_GROUP_CHAT_ID || DOCUMENT_GROUP_CHAT_ID;
+const ARCHIVE_TOPIC_ID = process.env.ARCHIVE_TOPIC_ID ? Number(process.env.ARCHIVE_TOPIC_ID) : undefined;
 const DOC_SAMPLES_SHEET = 'DOC_SAMPLES'; // A:KOD B:TALAB/TAVSIF C:NAMUNA_FILE_ID D:TUR
 const FORM_SAMPLES_SHEET = 'FORM_SAMPLES'; // A:STEP_KEY B:FILE_ID C:TUR — forma savoli namunasi (masalan zagran passport)
 const DOC_GUIDE_SHEET = 'DOC_GUIDE';   // A:№ B:DOC_CODE C:TALAB D:NAMUNA_FILE_ID E:NAMUNA_TURI // A:timestamp B:contractId C:docCode D:fileType E:fileId
@@ -349,6 +356,83 @@ async function sendVideoWithButton(chatId, fileId, caption, buttonText, callback
     req.write(data);
     req.end();
   });
+}
+
+// =====================================================================
+// ZIP ARXIV — admin/supervisor talabaning to'liq hujjatlar to'plamini
+// (ZIP fayl) botga yuboradi, bot uni "Hujjat arxiv" topic'iga saqlaydi
+// va CONTRACT_ID bo'yicha keshlaydi. Keyinchalik istalgan vaqtda
+// shu shartnoma bo'yicha ZIP qayta so'ralishi mumkin.
+// =====================================================================
+
+function isZipFile(document) {
+  if (!document) return false;
+  const name = String(document.file_name || '').toLowerCase();
+  const mime = String(document.mime_type || '').toLowerCase();
+  return name.endsWith('.zip') || mime.includes('zip');
+}
+
+/** Xabar matni/caption ichidan shartnoma ID'ga o'xshash matnni topadi. */
+function extractContractIdGuess(text) {
+  if (!text) return null;
+  const m = String(text).trim().match(/[A-Za-z0-9]{2,6}-[A-Za-z0-9]{2,8}/);
+  return m ? m[0].toUpperCase() : null;
+}
+
+async function findZipArchiveRow(contractId) {
+  const rows = await readSheetRange(`${ZIP_ARCHIVE_SHEET}!A2:E2000`) || [];
+  const normalized = String(contractId).trim().toUpperCase();
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (r && String(r[0] || '').trim().toUpperCase() === normalized) {
+      return { row: i + 2, fileId: r[1], fileName: r[2] || 'hujjatlar.zip' };
+    }
+  }
+  return null;
+}
+
+async function saveZipArchive(contractId, fileId, fileName, uploaderLabel) {
+  const existing = await findZipArchiveRow(contractId);
+  const now = new Date().toISOString();
+  if (existing) {
+    await updateCell(`${ZIP_ARCHIVE_SHEET}!B${existing.row}`, fileId);
+    await updateCell(`${ZIP_ARCHIVE_SHEET}!C${existing.row}`, fileName || '');
+    await updateCell(`${ZIP_ARCHIVE_SHEET}!D${existing.row}`, now);
+    await updateCell(`${ZIP_ARCHIVE_SHEET}!E${existing.row}`, uploaderLabel || '');
+  } else {
+    await appendRow(`${ZIP_ARCHIVE_SHEET}!A:E`, [
+      String(contractId).trim().toUpperCase(), fileId, fileName || '', now, uploaderLabel || '',
+    ]);
+  }
+}
+
+/**
+ * Qabul qilingan ZIP faylni yakunlaydi: Sheet'ga saqlaydi, arxiv
+ * topic'iga forward qiladi, hodimga tasdiq beradi.
+ */
+async function finalizeZipArchive(chatId, contractId, fileId, fileName, uploaderLabel) {
+  const rowNum = await findRowByContractId(contractId);
+  if (!rowNum) {
+    await sendMessage(chatId, `"${contractId}" — bunday shartnoma DRAFT sahifasida topilmadi. Qayta urinib ko'ring.`);
+    return false;
+  }
+
+  try {
+    await saveZipArchive(contractId, fileId, fileName, uploaderLabel);
+  } catch (e) {
+    console.error('ZIP_ARCHIVE ga yozishda xato:', e);
+    await sendMessage(chatId, 'Sheets\'ga yozishda texnik xatolik yuz berdi, lekin fayl arxiv guruhiga baribir yuboriladi.');
+  }
+
+  await telegramApi('sendDocument', {
+    chat_id: ARCHIVE_GROUP_CHAT_ID,
+    message_thread_id: ARCHIVE_TOPIC_ID,
+    document: fileId,
+    caption: `📦 To'liq hujjatlar arxivi\nShartnoma: ${contractId}\nYukladi: ${uploaderLabel || '-'}`,
+  });
+
+  await sendMessage(chatId, `✅ "${contractId}" uchun ZIP arxivga saqlandi va guruhga yuborildi.`, keyboardForUser(chatId));
+  return true;
 }
 
 async function getDocumentsForContract(contractId) {
@@ -920,6 +1004,7 @@ const ADMIN_COMMANDS = [
   { command: 'namuna', description: 'Hujjat namunasi/talabini sozlash' },
   { command: 'savolnamuna', description: 'Forma savoliga namuna rasm biriktirish' },
   { command: 'savolnamuna_royxat', description: 'Namunali savollarni korish/ozgartirish' },
+  { command: 'arxiv', description: 'Talabaning toliq ZIP hujjatlar arxivini olish' },
   { command: 'qollanma', description: 'Funksiyalar bo\'yicha yo\'riqnoma' },
   { command: 'menu', description: 'Tugmalarni qayta ko\'rsatish' },
 ];
@@ -1873,6 +1958,17 @@ async function processUpdate(body) {
       return;
     }
 
+    // --- /arxiv: talabaning to'liq ZIP hujjatlar to'plamini olib berish ---
+    if (text === '/arxiv') {
+      if (!isAdmin(chatId) && !isBoss(chatId) && !isSupervisor(chatId)) {
+        await sendMessage(chatId, 'Bu funksiya faqat hodimlar uchun.');
+        return;
+      }
+      userStates.set(chatId, { ...(userStates.get(chatId) || {}), mode: 'awaiting_arxiv_contract_id' });
+      await sendMessage(chatId, 'Qaysi talabaning to\'liq hujjatlar arxivi kerak? Shartnoma raqamini kiriting:');
+      return;
+    }
+
     // --- /qollanma: funksiyalar bo'yicha yo'riqnoma ---
     if (text === '/qollanma' || text === '/yoriqnoma') {
       await sendMessage(chatId, guideForUser(chatId), keyboardForUser(chatId));
@@ -1914,6 +2010,30 @@ async function processUpdate(body) {
     // uchun — aks holda talaba tasodifan video yuborsa chalkashadi.
     if (message.video && canEditFaq(chatId)) {
       await sendMessage(chatId, `Video file_id:\n${message.video.file_id}\n\nBuni WELCOME_VIDEO_FILE_ID environment variable sifatida saqlang.`);
+      return;
+    }
+
+    // --- Hodim ZIP fayl yuborsa (talaba uchun to'liq hujjatlar
+    // to'plami) — avval bu talabaning shartnoma ID'sini aniqlashga
+    // harakat qilamiz (caption ichidan), topilmasa so'raymiz. ---
+    if (message.document && isZipFile(message.document) && (isAdmin(chatId) || isBoss(chatId) || isSupervisor(chatId))) {
+      const fileId = message.document.file_id;
+      const fileName = message.document.file_name || 'hujjatlar.zip';
+      const uploaderLabel = username ? `@${username}` : String(chatId);
+
+      const guessedId = extractContractIdGuess(message.caption);
+      if (guessedId) {
+        const ok = await finalizeZipArchive(chatId, guessedId, fileId, fileName, uploaderLabel);
+        if (ok) return;
+        // Topilmasa ham, pastga tushib qo'lda ID so'raymiz
+      }
+
+      userStates.set(chatId, {
+        ...(userStates.get(chatId) || {}),
+        mode: 'awaiting_zip_contract_id',
+        pendingZip: { fileId, fileName, uploaderLabel },
+      });
+      await sendMessage(chatId, 'Bu ZIP qaysi talabaga tegishli? Shartnoma raqamini kiriting:');
       return;
     }
 
@@ -2153,6 +2273,30 @@ async function processUpdate(body) {
 
     // --- Yordam matni kutilmoqda ---
     const session = userStates.get(chatId);
+    // --- ZIP arxiv uchun shartnoma ID kutilmoqda ---
+    if (session && session.mode === 'awaiting_zip_contract_id' && session.pendingZip) {
+      const { fileId, fileName, uploaderLabel } = session.pendingZip;
+      const contractId = text.trim().toUpperCase();
+      const ok = await finalizeZipArchive(chatId, contractId, fileId, fileName, uploaderLabel);
+      if (ok) {
+        userStates.set(chatId, { ...session, mode: null, pendingZip: null });
+      }
+      return;
+    }
+
+    // --- /arxiv: shartnoma ID kutilmoqda ---
+    if (session && session.mode === 'awaiting_arxiv_contract_id') {
+      const contractId = text.trim().toUpperCase();
+      const archive = await findZipArchiveRow(contractId);
+      userStates.set(chatId, { ...session, mode: null });
+      if (!archive) {
+        await sendMessage(chatId, `"${contractId}" uchun ZIP arxiv topilmadi. Hali yuklanmagan bo'lishi mumkin.`, keyboardForUser(chatId));
+        return;
+      }
+      await telegramApi('sendDocument', { chat_id: chatId, document: archive.fileId, caption: `📦 ${contractId} — to'liq hujjatlar arxivi` });
+      return;
+    }
+
     if (session && session.mode === 'awaiting_help_text') {
       const helpText = text;
       let contractId = session.contractId || 'noma\'lum';
@@ -2813,17 +2957,46 @@ async function handleGroupMessage(message) {
   if (text === '/hujjat') {
     const result = await sendMessage(chatId, 'Qaysi talabaning hujjatlari kerak? Shartnoma raqamini SHU XABARGA REPLY qilib yozing.', null, threadId);
     if (result && result.result && result.result.message_id) {
-      pendingGroupRequests.set(result.result.message_id, { chatId, threadId });
+      pendingGroupRequests.set(result.result.message_id, { chatId, threadId, type: 'hujjat' });
+    }
+    return;
+  }
+
+  // --- /arxiv: talabaning to'liq ZIP hujjatlar arxivini olib berish ---
+  // (faqat hodimlar — bu nozik, to'liq hujjatlar to'plami)
+  if (text === '/arxiv') {
+    const senderIsStaffForArxiv = userId && (isAdmin(userId) || isBoss(userId) || isSupervisor(userId));
+    if (!senderIsStaffForArxiv) {
+      await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.', null, threadId);
+      return;
+    }
+    const result = await sendMessage(chatId, 'Qaysi talabaning to\'liq ZIP arxivi kerak? Shartnoma raqamini SHU XABARGA REPLY qilib yozing.', null, threadId);
+    if (result && result.result && result.result.message_id) {
+      pendingGroupRequests.set(result.result.message_id, { chatId, threadId, type: 'arxiv' });
     }
     return;
   }
 
   // Reply orqali javob keldi
   if (message.reply_to_message && pendingGroupRequests.has(message.reply_to_message.message_id)) {
-    const { chatId: reqChatId, threadId: reqThreadId } = pendingGroupRequests.get(message.reply_to_message.message_id);
+    const { chatId: reqChatId, threadId: reqThreadId, type } = pendingGroupRequests.get(message.reply_to_message.message_id);
     pendingGroupRequests.delete(message.reply_to_message.message_id);
 
-    const contractId = text;
+    const contractId = text.trim().toUpperCase();
+
+    if (type === 'arxiv') {
+      const archive = await findZipArchiveRow(contractId);
+      if (!archive) {
+        await sendMessage(reqChatId, `"${contractId}" uchun ZIP arxiv topilmadi. Hali yuklanmagan bo'lishi mumkin.`, null, reqThreadId);
+        return;
+      }
+      await telegramApi('sendDocument', {
+        chat_id: reqChatId, message_thread_id: reqThreadId,
+        document: archive.fileId, caption: `📦 ${contractId} — to'liq hujjatlar arxivi`,
+      });
+      return;
+    }
+
     const docs = await getDocumentsForContract(contractId);
 
     if (docs.length === 0) {
