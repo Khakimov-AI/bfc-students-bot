@@ -75,6 +75,12 @@ const BANK_STATEMENT_CODES = [
   'BANK_STATEMENT_EMBASSY_PARENT',
 ];
 
+// Bank statement (universitet uchun) — hujjat sifatida so'raladi,
+// lekin talabaning "hujjatlari to'liq" deb belgilanishini
+// TO'SMAYDI. Faqat shu bitta hujjat qolsa, eslatma kunlikdan
+// haftalikka (faqat dushanba) o'tadi.
+const NON_BLOCKING_CODES = ['BANK_STATEMENT_UNIVERSITY'];
+
 // Ota-ona holatiga bog'liq hujjatlar — ular DOIM so'ralmaydi,
 // faqat tegishli holat bo'lganda ro'yxatga qo'shiladi.
 const CONDITIONAL_DOCS = [
@@ -154,7 +160,11 @@ function markDocReceived(missingList, code) {
 }
 
 function isComplete(missingList) {
-  return missingList.length === 0;
+  // Bank statement (universitet uchun) endi MAJBURIY emas — talaba
+  // buni jo'natmagan bo'lsa ham, hujjatlari "to'liq" deb hisoblanadi.
+  // Hujjat o'zi ro'yxatda (tugma sifatida) qolaveradi, talaba xohlasa
+  // yuborishi mumkin — faqat bu YAKUNLANISHNI to'sib turmaydi.
+  return missingList.filter((c) => !NON_BLOCKING_CODES.includes(c)).length === 0;
 }
 
 // ---------------------------------------------------------------------
@@ -317,6 +327,7 @@ module.exports = {
   CONDITIONAL_DOCS,
   VISA_STAGE_DOCS,
   BANK_STATEMENT_CODES,
+  NON_BLOCKING_CODES,
   PARENT_INCOME_CODES,
   MULTI_UPLOAD_CODES,
   MULTI_UPLOAD_MAX,

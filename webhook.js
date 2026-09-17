@@ -24,7 +24,7 @@ const {
   buildDocumentMenuKeyboard, buildBankStatementSubmenu, buildMissingDocsText,
   sendDocumentToGroup, DOCUMENT_TYPES, REQUIRED_DOCS, VISA_STAGE_DOCS,
   PARENT_INCOME_CODES, MULTI_UPLOAD_CODES, MULTI_UPLOAD_MAX, NO_FILE_CODES,
-  buildParentIncomeSubmenu, buildMoreFilesKeyboard,
+  buildParentIncomeSubmenu, buildMoreFilesKeyboard, NON_BLOCKING_CODES,
   DOCUMENT_GROUP_CHAT_ID, DOCUMENT_TOPIC_ID,
 } = require('./documentCollection');
 
@@ -70,6 +70,12 @@ const pendingGroupRequests = new Map();
 // Hodim shu xabarga REPLY qilsa, javob talabaga to'g'ridan-to'g'ri
 // yetkaziladi (alohida yozishuv ochish shart emas).
 const pendingHelpReplies = new Map();
+
+// Hujjatlar bo'limiga birinchi marta kirgan talabalarni kuzatish —
+// ularga bir marta (faqat birinchi marta) hujjat yuborish bo'yicha
+// video ko'rsatiladi.
+const docsVideoShownSet = new Set();
+const DOCS_VIDEO_FILE_ID = process.env.DOCS_VIDEO_FILE_ID; // hujjatlarni qanday yuborish bo'yicha video
 
 // Ustun harfini rowData obyekt kalitiga aylantirish uchun mos ustun
 // diapazoni (A dan AP gacha).
@@ -474,11 +480,12 @@ function sendFileTo(chatId, threadId, fileType, fileId, caption) {
 // TELEGRAM API (staff bot patterni bilan bir xil)
 // ---------------------------------------------------------------------
 
-function sendMessage(chatId, text, replyMarkup, threadId) {
+function sendMessage(chatId, text, replyMarkup, threadId, parseMode) {
   return new Promise((resolve, reject) => {
     const payload = { chat_id: chatId, text };
     if (replyMarkup) payload.reply_markup = replyMarkup;
     if (threadId) payload.message_thread_id = threadId;
+    if (parseMode) payload.parse_mode = parseMode;
     const data = JSON.stringify(payload);
     const options = {
       hostname: 'api.telegram.org',
@@ -1498,9 +1505,9 @@ async function renderStep(chatId, rowNum, stepKey, sessionData, isEditingChain) 
   await sendFormSampleIfAny(chatId, stepKey);
 
   if (step.type === 'buttons' || step.type === 'buttons_then_text') {
-    await sendMessage(chatId, questionText, buildStepKeyboard(step));
+    await sendMessage(chatId, questionText, buildStepKeyboard(step), null, step.parseMode);
   } else {
-    await sendMessage(chatId, questionText);
+    await sendMessage(chatId, questionText, null, null, step.parseMode);
   }
 }
 
@@ -1508,13 +1515,34 @@ async function renderStep(chatId, rowNum, stepKey, sessionData, isEditingChain) 
 // JAVOBNI QAYTA ISHLASH (text yoki button)
 // ---------------------------------------------------------------------
 
+// Bu qadamlarda: 1-marta noto'g'ri formatda kiritilsa — tushuntirish
+// bilan qayta so'raladi. 2-marta ham noto'g'ri bo'lsa — TALABA
+// KIRITGAN QIYMAT SHUNCHAKI QABUL QILINADI (talabani cheksiz
+// "qayta kiriting" tsiklida ushlab qolmaslik uchun).
+const RETRY_BYPASS_STEPS = new Set(['address', 'full_name']);
+
 async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
   const step = STUDENT_STEPS[stepKey];
   const trimmedValue = typeof answerValue === 'string' ? answerValue.trim() : answerValue;
 
   if (step.validate && !step.validate(trimmedValue)) {
-    await sendMessage(chatId, step.errorMsg || 'Format noto\'g\'ri, qayta kiriting.');
-    return;
+    if (RETRY_BYPASS_STEPS.has(stepKey) && session.retryBypassStep === stepKey) {
+      // IKKINCHI marta ham format mos kelmadi — baribir qabul qilamiz,
+      // pastga (oddiy oqimga) tushamiz.
+      session.retryBypassStep = null;
+      userStates.set(chatId, session);
+    } else {
+      if (RETRY_BYPASS_STEPS.has(stepKey)) {
+        session.retryBypassStep = stepKey;
+        userStates.set(chatId, session);
+      }
+      await sendMessage(chatId, step.errorMsg || 'Format noto\'g\'ri, qayta kiriting.');
+      return;
+    }
+  } else if (session.retryBypassStep === stepKey) {
+    // To'g'ri kiritildi — bayroqni tozalaymiz
+    session.retryBypassStep = null;
+    userStates.set(chatId, session);
   }
 
   // XAVFSIZLIK/MANTIQ TEKSHIRUVI: telefon raqamlari takrorlanmasligi
@@ -2200,6 +2228,21 @@ async function processUpdate(body) {
           await sendMessage(chatId, 'Avval shartnoma raqamingizni kiriting.', keyboardForUser(chatId));
           return;
         }
+
+        // Birinchi marta "Hujjatlarim" bosilganda — avval hujjat
+        // yuborish bo'yicha video ko'rsatiladi (xuddi ma'lumot
+        // so'rash bosqichidagidek), talaba tasdiqlagandan keyingina
+        // hujjatlar ro'yxati chiqadi.
+        if (!docsVideoShownSet.has(chatId) && DOCS_VIDEO_FILE_ID) {
+          docsVideoShownSet.add(chatId);
+          userStates.set(chatId, { ...ds, mode: 'awaiting_docs_video_ack' });
+          await sendVideoWithButton(chatId, DOCS_VIDEO_FILE_ID,
+            'Hujjatlaringizni qanday to\'g\'ri yuborish kerakligi shu videoda ko\'rsatilgan. '
+            + 'Videoni to\'liq ko\'rib chiqishingizni so\'raymiz.',
+            '✅ Videoni ko\'rib chiqdim', 'docsvideoack:seen');
+          return;
+        }
+
         const rowData = await getRowData(ds.row);
         const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
         await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
@@ -2635,6 +2678,10 @@ async function processUpdate(body) {
     }
     if (session.mode === 'awaiting_ready_ack') {
       await sendMessage(chatId, 'Iltimos, "Tayyorman" tugmasini bosing.');
+      return;
+    }
+    if (session.mode === 'awaiting_docs_video_ack') {
+      await sendMessage(chatId, 'Iltimos, avval videoni to\'liq ko\'rib chiqib, "✅ Videoni ko\'rib chiqdim" tugmasini bosing.');
       return;
     }
 
@@ -3581,6 +3628,21 @@ async function handleCallbackInner(callback) {
     return;
   }
 
+  // --- Hujjat yuborish videosi ko'rib chiqildi — hujjatlar menyusi ---
+  if (data === 'docsvideoack:seen') {
+    if (session.mode !== 'awaiting_docs_video_ack') {
+      answerCallbackQuery(callbackId, 'Bu tugma muddati o\'tgan.', true);
+      return;
+    }
+    answerCallbackQuery(callbackId, '');
+    session.mode = 'in_form';
+    userStates.set(chatId, session);
+    const rowData = await getRowData(session.row);
+    const missing = getMissingDocs(rowData.AR, rowData.AJ, rowData.AM);
+    await sendMessage(chatId, buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
+    return;
+  }
+
   // --- Forma ichidagi tugma javoblari (ans:VALUE) ---
   if (data.startsWith('ans:')) {
     const value = data.substring(4);
@@ -4111,7 +4173,10 @@ async function runDocumentReminderTick() {
       if (lastReminder === reminderKey) continue; // shu oyna uchun allaqachon yuborilgan
 
       const missing = getMissingDocs(missingCell, fatherName, motherName);
-      if (isComplete(missing)) continue; // hammasi topshirilgan
+      // MUHIM: bank statement (universitet) MAJBURIY emas — agar faqat
+      // shu qolgan bo'lsa, isComplete() TRUE qaytaradi va kunlik
+      // eslatma bu yerda to'xtaydi (haftalik eslatmaga o'tadi, pastda).
+      if (isComplete(missing)) continue; // hammasi (majburiylari) topshirilgan
 
       await sendMessage(chatId, 'Eslatma: hujjatlaringiz hali to\'liq emas.\n\n' + buildMissingDocsText(missing), buildDocumentMenuKeyboard(missing));
       await updateCell(`${DRAFT_SHEET}!AV${rowNum}`, reminderKey);
@@ -4120,6 +4185,117 @@ async function runDocumentReminderTick() {
     console.error('Eslatma tick xatosi:', err);
   } finally {
     reminderTickRunning = false;
+  }
+}
+
+let bankReminderTickRunning = false;
+
+/**
+ * Bank statement (universitet uchun) MAJBURIY emas, shuning uchun
+ * KUNLIK eslatmaga kirmaydi. Lekin agar talaba boshqa BARCHA
+ * hujjatlarni jo'natib, faqat shu bittasi qolgan bo'lsa — HAFTADA
+ * BIR MARTA (dushanba, 10:00) eslatib qo'yamiz, aks holda talaba
+ * buni butunlay unutib qo'yishi mumkin.
+ */
+async function runBankStatementReminderTick() {
+  if (bankReminderTickRunning) return;
+  bankReminderTickRunning = true;
+  try {
+    const now = new Date();
+    const tashkent = new Date(now.getTime() + 5 * 3600000);
+    const dayOfWeek = tashkent.getUTCDay(); // 1 = dushanba
+    const hour = tashkent.getUTCHours();
+    const minute = tashkent.getUTCMinutes();
+    const dateKey = tashkent.toISOString().slice(0, 10);
+
+    if (dayOfWeek !== 1 || hour !== 10 || minute >= 5) return; // faqat dushanba, 10:00-10:05
+
+    const reminderKey = `${dateKey}-BANK`;
+    const rows = await readSheetRange(`${DRAFT_SHEET}!A2:AW2000`);
+    if (!rows) return;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row) continue;
+      const rowNum = i + 2;
+      const contractId = row[7] || ''; // H (ID)
+      const missingCell = row[43] || ''; // AR (MISSING DOCS)
+      const fatherName = row[35] || ''; // AJ (FATHER'S NAME)
+      const motherName = row[38] || ''; // AM (MOTHER'S NAME)
+      const chatId = row[46] || ''; // AU (CHAT_ID)
+      const lastReminder = row[47] || ''; // AV (LAST_DOC_REMINDER)
+
+      if (!contractId || !chatId) continue;
+      if (lastReminder === reminderKey) continue;
+
+      const missing = getMissingDocs(missingCell, fatherName, motherName);
+      // Faqat shu holatda eslatamiz: bank statement (universitet)
+      // hali yuborilmagan, LEKIN qolgan barcha hujjatlar topshirilgan.
+      const onlyBankLeft = missing.includes('BANK_STATEMENT_UNIVERSITY')
+        && missing.filter((c) => !NON_BLOCKING_CODES.includes(c)).length === 0;
+      if (!onlyBankLeft) continue;
+
+      await sendMessage(chatId,
+        'Eslatma: universitet uchun bank statement hujjatingiz hali yetib kelmadi.\n\n'
+        + 'Boshqa barcha hujjatlaringiz qabul qilingan — faqat shu bittasi qoldi. '
+        + 'Iltimos, imkon qadar tezroq yuboring.',
+        buildDocumentMenuKeyboard(missing));
+      await updateCell(`${DRAFT_SHEET}!AV${rowNum}`, reminderKey);
+    }
+  } catch (err) {
+    console.error('Bank statement eslatma xatosi:', err);
+  } finally {
+    bankReminderTickRunning = false;
+  }
+}
+
+let preConfirmReminderTickRunning = false;
+
+/**
+ * Talaba botni ishga tushirib, shartnoma ID kiritgan (chat_id
+ * yozilgan), LEKIN hali ma'lumotlarini TASDIQLAMAGAN (B ustuni
+ * bo'sh) bo'lsa — bu eng xavfli holat: talaba forma o'rtasida
+ * "yo'qolib qolgan". Shuning uchun kuniga 3 marta (10:00, 14:00,
+ * 18:00) eslatib turamiz — bu hujjat yuborishga o'tishdagi ENG
+ * MUHIM bosqich ekanini ta'kidlab.
+ */
+async function runPreConfirmReminderTick() {
+  if (preConfirmReminderTickRunning) return;
+  preConfirmReminderTickRunning = true;
+  try {
+    const { hour, minute, dateKey } = getTashkentHourAndDateKey();
+    const isReminderWindow = (hour === 10 || hour === 14 || hour === 18) && minute < 5;
+    if (!isReminderWindow) return;
+
+    const reminderKey = `${dateKey}-PRE-${hour}`;
+    const rows = await readSheetRange(`${DRAFT_SHEET}!A2:AW2000`);
+    if (!rows) return;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row) continue;
+      const rowNum = i + 2;
+      const status = row[1] || ''; // B (BOT_STATUS)
+      const contractId = row[7] || ''; // H (ID)
+      const chatId = row[46] || ''; // AU (CHAT_ID)
+      const lastReminder = row[47] || ''; // AV (LAST_DOC_REMINDER)
+
+      if (!contractId || !chatId) continue; // hali /start ham bosmagan
+      if (String(status).trim()) continue; // B allaqachon to'ldirilgan — tasdiqlangan
+      if (lastReminder === reminderKey) continue;
+
+      await sendMessage(chatId,
+        '❗️ Ma\'lumotlaringizni hali to\'liq kiritmagansiz.\n\n'
+        + 'Bu — Koreyaga ketish yo\'lidagi ENG MUHIM bosqich: ma\'lumotlaringizni '
+        + 'to\'liq taqdim qilib, hujjatlaringizni bizga jo\'natishingiz kerak. '
+        + 'Shu bosqichsiz keyingi jarayonlar boshlanmaydi.\n\n'
+        + 'Iltimos, davom eting.');
+      await updateCell(`${DRAFT_SHEET}!AV${rowNum}`, reminderKey);
+    }
+  } catch (err) {
+    console.error('Tasdiqlanmagan talaba eslatma xatosi:', err);
+  } finally {
+    preConfirmReminderTickRunning = false;
   }
 }
 
@@ -4132,4 +4308,6 @@ app.listen(PORT, () => {
   setInterval(runPaymentReminderTick, 5 * 60 * 1000);
   setInterval(runStatusWatchTick, 5 * 60 * 1000);
   setInterval(runDailySummaryTick, 5 * 60 * 1000);
+  setInterval(runBankStatementReminderTick, 5 * 60 * 1000);
+  setInterval(runPreConfirmReminderTick, 5 * 60 * 1000);
 });

@@ -155,8 +155,10 @@ const STUDENT_STEPS = {
   // --- 1. ISM-FAMILYA (zagran ogohlantirishi + namuna bilan) ---
   full_name_warning: {
     type: 'buttons',
-    question: 'ESLATMA: Ism-familyangizni chet elga chiqish pasport(ZAGRAN)ingizdagidek kiriting. '
-      + 'Bu Universitetga topshirish va visa hujjatlari uchun foydalaniladi.',
+    question: '📌<b>ESLATMA</b>: Ism-familyangizni chet elga chiqish pasport(ZAGRAN)ingizdagidek kiriting. '
+      + 'Bu Universitetga topshirish va visa hujjatlari uchun foydalaniladi.\n\n'
+      + 'Ogohlantirildim tugmasini bosganingizdan keyin ism-familyangizni to\'liq kiritishingiz mumkin bo\'ladi❗️',
+    parseMode: 'HTML',
     options: [{ text: 'OGOHLANTIRILDIM', value: 'ack' }],
     sheetCol: null,
     next: () => 'full_name',
@@ -172,7 +174,7 @@ const STUDENT_STEPS = {
       + 'To\'liq ism-familyangizni kiriting.\n\n'
       + 'NAMUNA: ABDULLAEV ADBULLAJON ABDULLAJON UGLI',
     validate: validators.fullName,
-    errorMsg: 'Ism zagran passportdagidek bo\'lishi kerak:\n'
+    errorMsg: 'Ism-familyangizni to\'g\'ri kiritganingizga aminmisiz?:\n'
       + '• Faqat lotin harflari (apostrof va kirill yozuv qabul qilinmaydi)\n'
       + '• Kamida 3 ta so\'z: familya + ism + otasining ismi\n\n'
       + 'NAMUNA: ABDULLAEV ADBULLAJON ABDULLAJON UGLI',
@@ -500,8 +502,10 @@ const STUDENT_STEPS = {
     question: 'Yashaydigan to\'liq manzilingizni shu tartibda kiriting: Viloyat, tuman, ko\'cha, uy raqami.\n\n'
       + 'NAMUNA: Andijon, Andijon tumani, Qandolatchilar ko\'chasi 3',
     validate: validators.address,
-    errorMsg: 'Manzil namunadagi tartibda, vergul bilan ajratib to\'liq kiritilishi kerak: '
-      + 'Viloyat, tuman, ko\'cha, uy raqami.\n\nNAMUNA: Andijon, Andijon tumani, Qandolatchilar ko\'chasi 3',
+    errorMsg: 'Manzilingizni NAMUNADAGIDEK, vergullar bilan ajratib kiriting:\n'
+      + 'Viloyat, tuman, ko\'cha nomi, uy raqami.\n\n'
+      + 'Ko\'cha nomi va uy raqamini albatta ko\'rsating — bularsiz manzil to\'liq hisoblanmaydi.\n\n'
+      + 'NAMUNA: Andijon, Andijon tumani, Qandolatchilar ko\'chasi 3',
     sheetCol: 'W', // ADRESS
     next: () => 'region',
   },
@@ -520,9 +524,9 @@ const STUDENT_STEPS = {
     question: 'Oldin vizaga topshirib, rad javobi olganmisiz?',
     options: [
       { text: 'Ha', value: 'HA' },
-      { text: 'Yo\'q', value: 'YOQ' },
+      { text: 'RAD JAVOBI OLMAGANMAN', value: 'RAD JAVOBI OLMAGANMAN' },
     ],
-    sheetCol: null,
+    sheetCol: 'AI', // REJECTION HISTORY — HA tanlansa keyingi qadamda batafsil bilan qayta yoziladi
     next: (data) => (data.rejection_history === 'HA' ? 'rejection_detail' : 'school_name'),
   },
   rejection_detail: {
@@ -557,9 +561,9 @@ const STUDENT_STEPS = {
     label: 'Bitirgan sana',
     type: 'text',
     question: (data) => data.graduating_this_year === 'EXPECTED'
-      ? 'Taxminiy bitirish sanangizni kiriting (YYYY.MM):'
-      : 'Bitirgan sanangizni kiriting (YYYY.MM):',
-    validate: validators.graduationDate,
+      ? 'Taxminiy bitirish sanangizni kiriting (YYYY.MM.DD).\n\nNAMUNA: 2025.06.20'
+      : 'Bitirgan sanangizni kiriting (YYYY.MM.DD).\n\nNAMUNA: 2023.06.20',
+    validate: validators.notEmpty,
     sheetCol: 'AB', // GRADUATION DATE
     next: (data) => (data.graduating_this_year === 'EXPECTED' ? 'gpa_expected' : 'gpa_known'),
   },
