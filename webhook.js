@@ -1421,8 +1421,34 @@ const EDIT_ROOT_CLEAR_COLS = {
   rejection_history: ['AI'],      // eski AE -> yangi AI
 };
 
+// ---------------------------------------------------------------------
+// XAVFSIZLIK TO'SIG'I: STUDENT_STEPS[key] har doim TOPILADI deb
+// FARAZ QILINMAYDI. Agar Sheet'dagi CURRENT_STEP ustuni endi mavjud
+// bo'lmagan/o'chirilgan/qayta nomlangan step kalitini saqlab qolgan
+// bo'lsa, bu funksiya "Cannot read properties of undefined (reading
+// 'type')" turidagi tushunarsiz XATO O'RNIGA — jim tarzda FIRST_STEP'ga
+// qaytaradi, adminga xabar beradi va Sheet'dagi ko'rsatkichni tuzatadi.
+function warnUnknownStep(stepKey, rowNum, where) {
+  console.error(`NOMA'LUM STEP KALITI: "${stepKey}" (qator ${rowNum}, joy: ${where}). FIRST_STEP'ga qaytarilmoqda.`);
+  if (ADMIN_NOTIFY_CHAT_ID) {
+    sendMessage(ADMIN_NOTIFY_CHAT_ID,
+      `⚠️ BOT: noma'lum STUDENT_STEPS kaliti\n\nQator: ${rowNum}\nKalit: "${stepKey}"\nJoyi: ${where}\n\nFIRST_STEP'ga avtomatik qaytarildi.`)
+      .catch(() => {});
+  }
+}
+
 async function renderStep(chatId, rowNum, stepKey, sessionData, isEditingChain) {
-  const step = STUDENT_STEPS[stepKey];
+  let step = STUDENT_STEPS[stepKey];
+
+  if (!step) {
+    warnUnknownStep(stepKey, rowNum, 'renderStep');
+    if (stepKey === FIRST_STEP) {
+      console.error('FIRST_STEP ham STUDENT_STEPS ichida topilmadi — renderStep to\'xtatildi.');
+      return;
+    }
+    await writeCurrentStep(rowNum, FIRST_STEP);
+    return renderStep(chatId, rowNum, FIRST_STEP, {}, false);
+  }
 
   // 'skip' turdagi steplar avtomatik yoziladi, savol so'ralmaydi
   if (step.type === 'skip') {
@@ -1524,6 +1550,13 @@ const RETRY_BYPASS_STEPS = new Set(['address', 'full_name']);
 async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
   const step = STUDENT_STEPS[stepKey];
   const trimmedValue = typeof answerValue === 'string' ? answerValue.trim() : answerValue;
+
+  if (!step) {
+    warnUnknownStep(stepKey, rowNum, 'handleStepAnswer');
+    await writeCurrentStep(rowNum, FIRST_STEP);
+    await sendMessage(chatId, 'Kechirasiz, texnik nosozlik tufayli qaytadan boshlashga to\'g\'ri keldi.');
+    return renderStep(chatId, rowNum, FIRST_STEP, {}, false);
+  }
 
   if (step.validate && !step.validate(trimmedValue)) {
     if (RETRY_BYPASS_STEPS.has(stepKey) && session.retryBypassStep === stepKey) {
@@ -2822,6 +2855,14 @@ async function processUpdate(body) {
       const currentStepKey = rowData[CURRENT_STEP_COLUMN] || FIRST_STEP;
       const step = STUDENT_STEPS[currentStepKey];
 
+      if (!step) {
+        warnUnknownStep(currentStepKey, session.row, 'processUpdate:in_form matn');
+        await writeCurrentStep(session.row, FIRST_STEP);
+        await sendMessage(chatId, 'Kechirasiz, texnik nosozlik tufayli qaytadan boshlashga to\'g\'ri keldi.');
+        await renderStep(chatId, session.row, FIRST_STEP, {}, false);
+        return;
+      }
+
       if (step.type === 'text') {
         await handleStepAnswer(chatId, session.row, currentStepKey, text, session);
       } else if (step.type === 'buttons_then_text' && session.awaitingFollowUp) {
@@ -3651,6 +3692,15 @@ async function handleCallbackInner(callback) {
     const step = STUDENT_STEPS[currentStepKey];
     const messageId = callback.message.message_id;
     const originalText = callback.message.text || '';
+
+    if (!step) {
+      warnUnknownStep(currentStepKey, session.row, 'handleCallbackInner:ans');
+      await writeCurrentStep(session.row, FIRST_STEP);
+      answerCallbackQuery(callbackId, '');
+      await sendMessage(chatId, 'Kechirasiz, texnik nosozlik tufayli qaytadan boshlashga to\'g\'ri keldi.');
+      await renderStep(chatId, session.row, FIRST_STEP, {}, false);
+      return;
+    }
 
     // Tanlangan variantning ko'rinadigan nomini topamiz
     const chosen = (step.options || []).find((o) => o.value === value);
