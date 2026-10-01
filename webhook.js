@@ -1458,13 +1458,38 @@ async function verifySessionRow(session, rowData) {
   console.error(`QATOR SILJIGAN: sessiya qatori ${session.row} da ID "${rowData.H}", kutilgan "${session.contractId}". Qayta qidirilmoqda.`);
   const newRow = await findRowByContractId(session.contractId);
   if (!newRow) return null;
-  if (ADMIN_NOTIFY_CHAT_ID) {
-    sendMessage(ADMIN_NOTIFY_CHAT_ID,
-      `⚠️ BOT: DRAFT qatori siljigan\n\nShartnoma: ${session.contractId}\nEski qator: ${session.row}\nYangi qator: ${newRow}\n\nDRAFT sahifasida qatorlarni saralash/o'chirish/qo'shish xavfli!`)
-      .catch(() => {});
-  }
+  // Adminga xabar yuborilmaydi — jamoa qatorlarni doimiy siljitadi,
+  // bu odatiy holat; bot uni jim tuzatadi.
   session.row = newRow;
   return getRowData(newRow);
+}
+
+/**
+ * HAR BIR YANGILANISH BOSHIDA QATORNI TEKSHIRISH.
+ * Jamoa DRAFT sahifasida qatorlarni doimiy qo'shadi/o'chiradi/saralaydi,
+ * shuning uchun RAM'dagi session.row ga ishonib bo'lmaydi. Bu funksiya
+ * sessiyadagi qatorning H ustunini (shartnoma ID) o'qiydi — bitta kichik
+ * so'rov. ID mos kelsa, hech narsa o'zgarmaydi; mos kelmasa, qator ID
+ * bo'yicha qayta topilib, session.row yangilanadi. Shu tufayli keyingi
+ * BARCHA yozuvlar (forma, hujjat, tasdiqlash) to'g'ri qatorga tushadi.
+ * @returns {boolean} false — talabaning qatori umuman topilmadi
+ */
+async function ensureSessionRow(chatId, session) {
+  if (!session || !session.row || !session.contractId) return true;
+  const clean = (v) => String(v || '').replace(/[ ​﻿]/g, '').trim().toUpperCase();
+  const res = await readSheetRange(`${DRAFT_SHEET}!H${session.row}:H${session.row}`);
+  const idAtRow = res && res[0] && res[0][0];
+  if (clean(idAtRow) === clean(session.contractId)) return true;
+
+  const newRow = await findRowByContractId(session.contractId);
+  if (!newRow) {
+    console.error(`Sessiya ID ${session.contractId} DRAFT'da topilmadi (chat ${chatId}).`);
+    return false;
+  }
+  console.log(`Qator yangilandi: ${session.contractId} ${session.row} -> ${newRow}`);
+  session.row = newRow;
+  userStates.set(chatId, session);
+  return true;
 }
 
 async function renderStep(chatId, rowNum, stepKey, sessionData, isEditingChain) {
@@ -1915,6 +1940,16 @@ async function processUpdate(body) {
     const chatId = message.chat.id;
     let text = (message.text || '').trim();
     const username = message.from.username || '';
+
+    // QATOR SILJISHI HIMOYASI — har bir xabarda bir marta.
+    if (text !== '/start') {
+      const pre = userStates.get(chatId);
+      if (pre && !(await ensureSessionRow(chatId, pre))) {
+        userStates.set(chatId, { mode: 'awaiting_id' });
+        await sendMessage(chatId, 'Ma\'lumotlaringiz topilmadi. Iltimos, shartnoma raqamingizni qaytadan kiriting:');
+        return;
+      }
+    }
 
     // --- ADMIN: /viza — talaba viza bosqichiga o'tdi, endi KDB va
     // ota-ona bank statement hujjatlari talab qilinadi. Faqat shu
@@ -3335,6 +3370,17 @@ async function handleCallbackInner(callback) {
   const actorId = callback.from ? callback.from.id : chatId;
   const isGroupChat = callback.message.chat.type === 'group' || callback.message.chat.type === 'supergroup';
   const threadId = callback.message.message_thread_id;
+
+  // QATOR SILJISHI HIMOYASI — har bir tugma bosilishida bir marta.
+  if (!isGroupChat) {
+    const pre = userStates.get(chatId);
+    if (pre && !(await ensureSessionRow(chatId, pre))) {
+      answerCallbackQuery(callbackId, '');
+      userStates.set(chatId, { mode: 'awaiting_id' });
+      await sendMessage(chatId, 'Ma\'lumotlaringiz topilmadi. Iltimos, shartnoma raqamingizni qaytadan kiriting:');
+      return;
+    }
+  }
 
   // --- FAQ: savol tanlandi ---
   if (data.startsWith('faq:')) {
