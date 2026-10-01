@@ -1437,8 +1437,46 @@ function warnUnknownStep(stepKey, rowNum, where) {
   }
 }
 
+/** null / undefined / "null" / "" — forma oxiri belgisi */
+function isTerminalStepKey(stepKey) {
+  return stepKey === null || stepKey === undefined
+    || String(stepKey).trim() === '' || String(stepKey).trim().toLowerCase() === 'null';
+}
+
+/**
+ * QATOR SILJISHI HIMOYASI: sessiyadagi qator raqami RAM'da saqlanadi.
+ * Agar kimdir DRAFT sahifasida qator qo'shsa/o'chirsa/saralasa, bot
+ * BOSHQA talabaning qatoriga yozib yuborishi mumkin (AT ustunida "38"
+ * kabi begona qiymatlar shundan paydo bo'ladi). Shu sababli har safar
+ * H ustunidagi shartnoma ID sessiyadagi ID bilan solishtiriladi; mos
+ * kelmasa — qator ID bo'yicha qayta topiladi.
+ * @returns {Object|null} to'g'ri qatorning rowData'si yoki null
+ */
+async function verifySessionRow(session, rowData) {
+  const clean = (v) => String(v || '').replace(/[ ​﻿]/g, '').trim().toUpperCase();
+  if (!session.contractId || clean(rowData.H) === clean(session.contractId)) return rowData;
+  console.error(`QATOR SILJIGAN: sessiya qatori ${session.row} da ID "${rowData.H}", kutilgan "${session.contractId}". Qayta qidirilmoqda.`);
+  const newRow = await findRowByContractId(session.contractId);
+  if (!newRow) return null;
+  if (ADMIN_NOTIFY_CHAT_ID) {
+    sendMessage(ADMIN_NOTIFY_CHAT_ID,
+      `⚠️ BOT: DRAFT qatori siljigan\n\nShartnoma: ${session.contractId}\nEski qator: ${session.row}\nYangi qator: ${newRow}\n\nDRAFT sahifasida qatorlarni saralash/o'chirish/qo'shish xavfli!`)
+      .catch(() => {});
+  }
+  session.row = newRow;
+  return getRowData(newRow);
+}
+
 async function renderStep(chatId, rowNum, stepKey, sessionData, isEditingChain) {
   let step = STUDENT_STEPS[stepKey];
+
+  // "null"/bo'sh kalit — bu xato emas, balki "forma yakunlandi" belgisi
+  // (confirm.next() null qaytaradi). Talabani 1-savolga qaytarish
+  // o'rniga tasdiqlash sahifasiga yuboramiz — ma'lumotlari saqlanib qoladi.
+  if (isTerminalStepKey(stepKey)) {
+    await writeCurrentStep(rowNum, 'confirm');
+    return renderStep(chatId, rowNum, 'confirm', {});
+  }
 
   if (!step) {
     warnUnknownStep(stepKey, rowNum, 'renderStep');
@@ -1612,7 +1650,10 @@ async function handleStepAnswer(chatId, rowNum, stepKey, answerValue, session) {
   }
 
   const sessionData = { [stepKey]: trimmedValue };
-  const nextKey = step.next(sessionData);
+  let nextKey = step.next ? step.next(sessionData) : null;
+  // ILDIZ TUZATISH: next() null qaytarsa (forma oxiri), Sheet'ga "null"
+  // satri YOZILMAYDI — tasdiqlash sahifasiga o'tiladi.
+  if (isTerminalStepKey(nextKey)) nextKey = 'confirm';
 
   // Tahrirlash rejimida bo'lsa: agar shu step biror filialning ILDIZI
   // bo'lsa (masalan sertifikat holati), eski javobga tegishli ustunlar
@@ -2873,9 +2914,21 @@ async function processUpdate(body) {
 
     // --- Oddiy matn javobi (forma bosqichida) ---
     if (session.mode === 'in_form' && text) {
-      const rowData = await getRowData(session.row);
+      const rowData = await verifySessionRow(session, await getRowData(session.row));
+      if (!rowData) {
+        userStates.set(chatId, { mode: 'awaiting_id' });
+        await sendMessage(chatId, 'Ma\'lumotlaringiz topilmadi. Iltimos, shartnoma raqamingizni qaytadan kiriting:');
+        return;
+      }
+      userStates.set(chatId, session);
       const currentStepKey = rowData[CURRENT_STEP_COLUMN] || FIRST_STEP;
       const step = STUDENT_STEPS[currentStepKey];
+
+      if (isTerminalStepKey(currentStepKey)) {
+        await writeCurrentStep(session.row, 'confirm');
+        await renderStep(chatId, session.row, 'confirm', {});
+        return;
+      }
 
       if (!step) {
         warnUnknownStep(currentStepKey, session.row, 'processUpdate:in_form matn');
@@ -3709,11 +3762,25 @@ async function handleCallbackInner(callback) {
   // --- Forma ichidagi tugma javoblari (ans:VALUE) ---
   if (data.startsWith('ans:')) {
     const value = data.substring(4);
-    const rowData = await getRowData(session.row);
+    const rowData = await verifySessionRow(session, await getRowData(session.row));
+    if (!rowData) {
+      answerCallbackQuery(callbackId, '');
+      userStates.set(chatId, { mode: 'awaiting_id' });
+      await sendMessage(chatId, 'Ma\'lumotlaringiz topilmadi. Iltimos, shartnoma raqamingizni qaytadan kiriting:');
+      return;
+    }
+    userStates.set(chatId, session);
     const currentStepKey = rowData[CURRENT_STEP_COLUMN] || FIRST_STEP;
     const step = STUDENT_STEPS[currentStepKey];
     const messageId = callback.message.message_id;
     const originalText = callback.message.text || '';
+
+    if (isTerminalStepKey(currentStepKey)) {
+      answerCallbackQuery(callbackId, '');
+      await writeCurrentStep(session.row, 'confirm');
+      await renderStep(chatId, session.row, 'confirm', {});
+      return;
+    }
 
     if (!step) {
       warnUnknownStep(currentStepKey, session.row, 'handleCallbackInner:ans');
@@ -3727,6 +3794,21 @@ async function handleCallbackInner(callback) {
     // Tanlangan variantning ko'rinadigan nomini topamiz
     const chosen = (step.options || []).find((o) => o.value === value);
     const chosenLabel = chosen ? chosen.text : value;
+
+    // ESKIRGAN TUGMA HIMOYASI (asosiy ildiz sabab): talaba yuqoriga
+    // aylantirib, OLDINGI savolning hali bosilmagan tugmasini bossa,
+    // avval bu qiymat JORIY savolning javobi sifatida yozilardi
+    // (masalan "Erkak" -> otasining ismi ustuniga), tasdiqlash
+    // bosqichida esa next() = null bo'lib, AT ga "null" yozilardi.
+    // Endi: tugma joriy savolga tegishli bo'lmasa — qabul qilinmaydi.
+    const isButtonStep = step.type === 'buttons' || step.type === 'buttons_then_text';
+    if (!isButtonStep || !chosen) {
+      answerCallbackQuery(callbackId,
+        'Bu tugma eskirgan. Iltimos, oxirgi yuborilgan savolga javob bering.', true);
+      editMessageReplyMarkup(chatId, messageId, { inline_keyboard: [] });
+      await renderStep(chatId, session.row, currentStepKey, {});
+      return;
+    }
 
     // TANLOVNI QAYD ETISH: xabar matniga ✅ belgisi qo'shiladi va
     // qolgan tugmalar o'chiriladi — shunda talaba eski tugmalarni
