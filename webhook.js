@@ -2703,6 +2703,28 @@ async function processUpdate(body) {
       return;
     }
 
+    // XAVFSIZLIK TO'SIG'I: ba'zi rejimlar (in_form, awaiting_phone_verify,
+    // hujjat yuklash) session.row borligiga tayanadi — getRowData shu
+    // qiymat asosida Sheet qatorini o'qiydi. Agar negadir row yo'qolgan
+    // bo'lsa (masalan xotiradagi sessiya qisman holatda qolib ketgan
+    // bo'lsa), "getRowData: yaroqsiz rowNum qiymati (undefined)" turidagi
+    // tushunarsiz xato o'rniga — avval Sheet'dan tiklashga urinamiz,
+    // bo'lmasa foydalanuvchini xavfsiz holatga (shartnoma ID so'rash)
+    // qaytaramiz.
+    const ROW_REQUIRED_MODES = new Set(['in_form', 'awaiting_phone_verify', 'awaiting_document', 'awaiting_document_confirm']);
+    if (ROW_REQUIRED_MODES.has(session.mode) && !session.row) {
+      console.error(`Sessiya qatorsiz holatda (chat ${chatId}, mode: ${session.mode}) — tiklanmoqda.`);
+      const restored = await getOrRestoreSession(chatId);
+      if (restored && restored.row) {
+        session.row = restored.row;
+        session.contractId = session.contractId || restored.contractId;
+      } else {
+        userStates.set(chatId, { mode: 'awaiting_id' });
+        await sendMessage(chatId, 'Sessiyangiz topilmadi. Iltimos, shartnoma raqamingizni qaytadan kiriting:');
+        return;
+      }
+    }
+
     // --- Video tasdiqlash bosqichlarida talaba matn yozsa —
     // tugmani bosishini eslatamiz (video hali to'liq ko'rilmagan) ---
     if (session.mode === 'awaiting_onboarding_ack' || session.mode === 'awaiting_guide_ack') {
