@@ -102,11 +102,49 @@ const ALL_COLUMNS = Array.from({ length: LAST_COLUMN_INDEX }, (_, i) => colIndex
 // GOOGLE SHEETS FUNKSIYALARI (staff bot patterni asosida)
 // ---------------------------------------------------------------------
 
+/**
+ * Google xatosi vaqtinchalikmi (qayta urinsa bo'ladimi)? Google ba'zan
+ * "Internal error encountered." (500) yoki "The service is currently
+ * unavailable." (503) qaytaradi — bular bir necha soniyada o'zi tuzaladi.
+ * Xato kodi turli shaklda kelishi mumkin (son, satr, response.status),
+ * shuning uchun hammasi tekshiriladi.
+ */
+function getRetriableCode(err) {
+  if (!err) return 0;
+  const candidates = [err.code, err.status, err.response && err.response.status];
+  for (const c of candidates) {
+    const n = Number(c);
+    if (n === 429 || n === 500 || n === 502 || n === 503 || n === 504) return n;
+  }
+  const netCodes = ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'EPIPE'];
+  if (netCodes.includes(String(err.code))) return 503;
+  const msg = String(err.message || '');
+  if (/Internal error encountered|service is currently unavailable|backend error|socket hang up|network/i.test(msg)) return 500;
+  if (/quota|rate limit/i.test(msg)) return 429;
+  return 0;
+}
+
+// O'QISH ham endi qayta urinish bilan. Avval faqat YOZISH qayta
+// urinilardi — o'qishdagi bitta vaqtinchalik Google xatosi talabaga
+// "texnik xatolik", adminga "Internal error encountered." bo'lib chiqardi.
 async function readSheetRange(range) {
-  const client = await auth.getClient();
-  const sheets = google.sheets({ version: 'v4', auth: client });
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range });
-  return res.data.values;
+  let lastErr;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const client = await auth.getClient();
+      const sheets = google.sheets({ version: 'v4', auth: client });
+      const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range });
+      return res.data.values;
+    } catch (err) {
+      lastErr = err;
+      const code = getRetriableCode(err);
+      if (!code || i === 3) break;
+      const waitMs = code === 429 ? 4000 * (i + 1) : 500 * Math.pow(2, i);
+      console.warn(`readSheetRange(${range}): ${code} xatosi, ${waitMs}ms dan keyin qayta urinish (${i + 1}/4)`);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -153,9 +191,8 @@ async function withRetry(fn, label, attempts = 3) {
       return await fn();
     } catch (err) {
       lastErr = err;
-      const code = err && (err.code || (err.response && err.response.status));
-      const retriable = code === 429 || code === 503 || code === 500 || code === 502;
-      if (!retriable || i === attempts - 1) break;
+      const code = getRetriableCode(err);
+      if (!code || i === attempts - 1) break;
 
       // MUHIM: 429 (kvota) — bu DAQIQALIK limit, shuning uchun
       // millisekundlik kutish foydasiz. Haqiqiy kutish kerak.
@@ -2997,7 +3034,10 @@ async function processUpdate(body) {
     } catch (e2) { /* jim */ }
     if (ADMIN_NOTIFY_CHAT_ID) {
       try {
-        await sendMessage(ADMIN_NOTIFY_CHAT_ID, `⚠️ BOT XATOSI (message)\n\n${(err && err.message) || err}`);
+        const m0 = body.message || {};
+        const where = String((err && err.stack) || '').split('\n').slice(1, 4).map((l) => l.trim()).join('\n');
+        await sendMessage(ADMIN_NOTIFY_CHAT_ID,
+          `⚠️ BOT XATOSI (message)\nChat: ${m0.chat && m0.chat.id}\nMatn: ${String(m0.text || (m0.document ? '[fayl]' : m0.photo ? '[rasm]' : '')).slice(0, 80)}\n\n${(err && err.message) || err}\n\n${where}`);
       } catch (e3) { /* jim */ }
     }
   }
