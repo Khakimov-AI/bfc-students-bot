@@ -27,7 +27,7 @@ const {
   buildParentIncomeSubmenu, buildMoreFilesKeyboard, NON_BLOCKING_CODES,
   DOCUMENT_GROUP_CHAT_ID, DOCUMENT_TOPIC_ID,
 } = require('./documentCollection');
-const { createProfileService } = require('./profileReport');
+const { createProfileService, normalizeStatus } = require('./profileReport');
 const { resolveDbColumns, mergeStudent, DB_LAST_COL } = require('./studentData');
 const { formatStaffProfile } = require('./staffProfile');
 
@@ -889,6 +889,38 @@ async function searchStudents(query) {
   return out;
 }
 
+/**
+ * /profil so'rovini bajaradi. arg: "2603-K0001" (oldindan ko'rish — PDF
+ * so'ragan hodimga/guruhga) yoki "2603-K0001 yubor" (talabaning o'ziga).
+ */
+async function runProfilCommand(chatId, arg, threadId, viewerId) {
+  const parts = String(arg || '').trim().split(/\s+/);
+  const pid = (parts[0] || '').toUpperCase();
+  const sendToStudent = /^(yubor|send)$/i.test(parts[1] || '');
+  if (!CONTRACT_ID_RE.test(pid)) {
+    await sendMessage(chatId, `"${parts[0] || ''}" — shartnoma raqami formatiga mos emas. Masalan: 2603-K0001`, null, threadId);
+    return;
+  }
+  try {
+    if (sendToStudent) {
+      if (!(isAdmin(viewerId) || isBoss(viewerId) || isSupervisor(viewerId))) {
+        await sendMessage(chatId, 'Talabaga yuborish faqat supervisor va rahbariyat uchun.', null, threadId);
+        return;
+      }
+      const r = await profileService.sendNow(pid);
+      await sendMessage(chatId, r.ok ? `✅ ${pid} — hisobot talabaga yuborildi.` : `❌ ${pid}: ${r.error}`, null, threadId);
+      return;
+    }
+    const r = await profileService.buildForContract(pid);
+    if (r.error) { await sendMessage(chatId, `❌ ${r.error}`, null, threadId); return; }
+    await profileService.sendPdfToTelegram(chatId, r.pdf, `Hisobot_${pid}.pdf`,
+      `👁 Oldindan ko'rish (talabaga yuborilmadi) · ${pid}`, threadId);
+  } catch (e) {
+    console.error('/profil xatosi:', e);
+    await sendMessage(chatId, 'Xatolik: ' + e.message, null, threadId);
+  }
+}
+
 /** /talaba so'rovini bajaradi: ID bo'lsa profil, aks holda qidiruv natijasi. */
 async function handleStudentLookup(chatId, query, threadId, viewerId) {
   const q = String(query || '').trim();
@@ -995,7 +1027,11 @@ const STATUS_MESSAGES = {
   'HUJJAT TAYYOR': 'Hujjatlaringiz universitetga topshirishga tayyorlandi.',
   'UNIVERSITY 1 TOPSHIRILDI': 'Hujjatlaringiz birinchi universitetga topshirildi. Natijani kutmoqdamiz.',
   'UNIVERSITY 2 TOPSHIRILDI': 'Hujjatlaringiz ikkinchi universitetga topshirildi. Natijani kutmoqdamiz.',
-  'QABUL QILINDI': 'Tabriklaymiz! Siz universitetga qabul qilindingiz. Keyingi qadam — kontrakt to\'lovi.',
+  'QABUL QILINDI': '🎉🎓 TABRIKLAYMIZ!\n\nSiz universitetga qabul qilindingiz! 🇰🇷\n\n'
+    + 'Bu — sizning mehnatingiz, sabr-toqatingiz va to‘g‘ri tanlovingiz natijasi. '
+    + 'Koreyadagi talabalik hayotingiz endi juda yaqin! ✨\n\n'
+    + 'Keyingi qadam — kontrakt to‘lovi va viza hujjatlari. Supervisoringiz tez orada siz bilan bog‘lanadi. '
+    + 'Bu yo‘lda biz har doim yoningizdamiz! 💪',
   'QABUL QILINMADI': 'Afsuski, bu safar qabul qilinmadingiz. Mas\'ul hodimimiz siz bilan bog\'lanib, keyingi imkoniyatlarni muhokama qiladi.',
   "KONTRAKT TO'LADI": 'Kontrakt to\'lovingiz qabul qilindi. Endi viza hujjatlarini tayyorlash bosqichiga o\'tamiz.',
   "KDB QO'YDI": 'KDB bank hisobingiz ochildi. Elchixona uchun hujjatlar tayyorlanmoqda.',
@@ -1008,6 +1044,27 @@ const STATUS_MESSAGES = {
   'SHARTNOMA BEKOR QILDI': 'Shartnomangiz bekor qilingan. Savollaringiz bo\'lsa, filialingizga murojaat qiling.',
   'MUZLATDI': 'Jarayoningiz vaqtincha to\'xtatilgan. Qayta boshlash uchun filialingizga murojaat qiling.',
 };
+
+/**
+ * DB!STATUS qiymati uchun talabaga yuboriladigan matn. "QABUL QILINDI 1/2"
+ * kabi yozilishlar normallashtiriladi; qabul bo'lsa universitet nomi bilan
+ * alohida tabrik matni tuziladi.
+ */
+function statusMessageFor(status, dbRow) {
+  const norm = normalizeStatus(status);
+  if (norm.key === 'QABUL QILINDI' && dbRow) {
+    const uniCols = [DB_COL.UNIVERSITY_1, DB_COL.UNIVERSITY_2];
+    const uni = String(dbRow[uniCols[norm.acceptedIdx || 0]] || dbRow[DB_COL.UNIVERSITY_1] || '').trim();
+    if (uni) {
+      return `🎉🎓 TABRIKLAYMIZ!\n\nSiz ${uni}ga qabul qilindingiz! 🇰🇷\n\n`
+        + 'Bu — sizning mehnatingiz, sabr-toqatingiz va to‘g‘ri tanlovingiz natijasi. '
+        + 'Koreyadagi talabalik hayotingiz endi juda yaqin! ✨\n\n'
+        + 'Keyingi qadam — kontrakt to‘lovi va viza hujjatlari. Supervisoringiz tez orada siz bilan bog‘lanadi. '
+        + 'Bu yo‘lda biz har doim yoningizdamiz! 💪';
+    }
+  }
+  return STATUS_MESSAGES[norm.key] || null;
+}
 
 /**
  * Talabaga joriy holatini yuboradi. Ma'lumot DB sahifasidan olinadi
@@ -1043,7 +1100,7 @@ async function sendStudentStatus(chatId, contractId, draftRowNum) {
   const uni2 = dbRow[DB_COL.UNIVERSITY_2] || '';
   const branch = dbRow[DB_COL.BRANCH] || '';
 
-  let statusText = STATUS_MESSAGES[status.toUpperCase()];
+  let statusText = statusMessageFor(status, dbRow);
   if (!statusText) {
     statusText = status
       ? `Joriy bosqich: ${status}`
@@ -1236,6 +1293,8 @@ async function registerDefaultCommands() {
   const GROUP_COMMANDS = [
     { command: 'hujjat', description: 'Talaba hujjatlarini so\'rash' },
     { command: 'talaba', description: 'Talaba ma\'lumotlari (hodimlar uchun)' },
+    { command: 'profil', description: 'Talabaning PDF hisoboti (hodimlar uchun)' },
+    { command: 'profil', description: 'Talabaning PDF hisoboti (hodimlar uchun)' },
     { command: 'savollar', description: 'Ko\'p so\'raladigan savollar' },
     { command: 'filiallar', description: 'Filiallarimiz manzillari' },
     { command: 'aloqa', description: 'Hodimlar telefon raqamlari' },
@@ -2214,39 +2273,18 @@ async function processUpdate(body) {
 
     // --- /profil ID [yubor]: talabaning shaxsiy PDF hisobotini
     // oldindan ko'rish (hodimning o'ziga) yoki talabaga darhol yuborish ---
-    if (text === '/profil' || text.startsWith('/profil ')) {
-      if (!isAdmin(chatId) && !isBoss(chatId) && !isSupervisor(chatId)) {
+    if (/^\/profil(@\w+)?(\s|$)/i.test(text)) {
+      if (!canViewStudent(chatId)) {
         await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.');
         return;
       }
-      const parts = text.split(/\s+/).slice(1);
-      const pid = (parts[0] || '').toUpperCase();
-      const sendToStudent = /^(yubor|send)$/i.test(parts[1] || '');
-      if (!pid) {
-        await sendMessage(chatId,
-          'Foydalanish:\n/profil 2603-K0001 — PDF hisobotni o\'zingizga ko\'rish\n'
-          + '/profil 2603-K0001 yubor — talabaning o\'ziga darhol yuborish\n\n'
-          + `Avtomatik yuborish: ${PROFILE_AUTO_SEND ? 'YOQILGAN ✅' : 'O\'CHIRILGAN (PROFILE_AUTO_SEND=1 qo\'ying)'}`);
+      const arg = text.replace(/^\/profil(@\w+)?/i, '').trim();
+      if (!arg) {
+        userStates.set(chatId, { ...(userStates.get(chatId) || {}), mode: 'awaiting_profil_id' });
+        await sendMessage(chatId, 'Qaysi talabaning PDF hisoboti kerak? Shartnoma raqamini yozing:\n\n(Talabaning o\'ziga yuborish uchun: 2603-K0001 yubor)');
         return;
       }
-      await sendMessage(chatId, 'PDF tayyorlanmoqda...');
-      try {
-        if (sendToStudent) {
-          const r = await profileService.sendNow(pid);
-          await sendMessage(chatId, r.ok ? `✅ ${pid} — hisobot talabaga yuborildi.` : `❌ ${pid}: ${r.error}`);
-        } else {
-          const r = await profileService.buildForContract(pid);
-          if (r.error) {
-            await sendMessage(chatId, `❌ ${r.error}`);
-          } else {
-            await profileService.sendPdfToTelegram(chatId, r.pdf, `Hisobot_${pid}.pdf`, `👁 Oldindan ko'rish (talabaga yuborilmadi)\n${pid}`);
-            if (r.notes.length) await sendMessage(chatId, 'ℹ️ ' + r.notes.join('\n• '));
-          }
-        }
-      } catch (e) {
-        console.error('/profil xatosi:', e);
-        await sendMessage(chatId, 'Xatolik: ' + e.message);
-      }
+      await runProfilCommand(chatId, arg, null, chatId);
       return;
     }
 
@@ -2675,6 +2713,13 @@ async function processUpdate(body) {
 
     // --- Yordam matni kutilmoqda ---
     const session = userStates.get(chatId);
+    // --- /profil: shartnoma raqami kutilmoqda ---
+    if (session && session.mode === 'awaiting_profil_id' && text) {
+      userStates.set(chatId, { ...session, mode: null });
+      await runProfilCommand(chatId, text, null, chatId);
+      return;
+    }
+
     // --- /talaba: ID yoki familiya kutilmoqda ---
     if (session && session.mode === 'awaiting_talaba_query' && text) {
       userStates.set(chatId, { ...session, mode: null });
@@ -3367,6 +3412,11 @@ async function handleGroupMessage(message) {
   const userId = message.from ? message.from.id : null;
   const username = message.from ? (message.from.username || '') : '';
 
+  // Diagnostika: guruhdan kelgan har bir buyruq logga yoziladi. Agar
+  // buyruq yozilgan-u, bu qator logda bo'lmasa — Telegram xabarni botga
+  // umuman yetkazmagan (BotFather'dagi privacy mode).
+  if (rawText.startsWith('/')) console.log(`Guruh buyrug'i: chat ${chatId}, user ${userId}, "${rawText.slice(0, 40)}"`);
+
   // Guruhda buyruq "@bot_nomi" bilan kelishi mumkin — uni ajratamiz
   const text = rawText.split('@')[0].trim();
 
@@ -3444,6 +3494,28 @@ async function handleGroupMessage(message) {
     }
   }
 
+  // --- /profil [ID] [yubor] — guruhda ham ishlaydi (faqat hodimlar).
+  // ID yozilmasa — bot so'raydi, hodim shu xabarga REPLY qilib yozadi. ---
+  {
+    const cmd = rawText.replace(/^(\/[\w-]+)@\w+/, '$1');
+    if (/^\/profil(\s|$)/i.test(cmd)) {
+      if (!canViewStudent(userId)) {
+        await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.', null, threadId);
+        return;
+      }
+      const arg = cmd.replace(/^\/profil/i, '').trim();
+      if (!arg) {
+        const result = await sendMessage(chatId, 'Qaysi talabaning PDF hisoboti kerak? Shartnoma raqamini SHU XABARGA REPLY qilib yozing.', null, threadId);
+        if (result && result.result && result.result.message_id) {
+          pendingGroupRequests.set(result.result.message_id, { chatId, threadId, type: 'profil' });
+        }
+        return;
+      }
+      await runProfilCommand(chatId, arg, threadId, userId);
+      return;
+    }
+  }
+
   // --- /arxiv: talabaning to'liq ZIP hujjatlar arxivini olib berish ---
   // (faqat hodimlar — bu nozik, to'liq hujjatlar to'plami)
   if (text === '/arxiv') {
@@ -3465,6 +3537,15 @@ async function handleGroupMessage(message) {
     pendingGroupRequests.delete(message.reply_to_message.message_id);
 
     const contractId = text.trim().toUpperCase();
+
+    if (type === 'profil') {
+      if (!canViewStudent(userId)) {
+        await sendMessage(reqChatId, 'Bu buyruq faqat hodimlar uchun.', null, reqThreadId);
+        return;
+      }
+      await runProfilCommand(reqChatId, rawText, reqThreadId, userId);
+      return;
+    }
 
     if (type === 'talaba') {
       if (!canViewStudent(userId)) {
@@ -4440,9 +4521,10 @@ async function runStatusWatchTick() {
       await updateCell(`${DB_SHEET}!AS${rowNum}`, status);
       if (isFirstCheck) continue;
 
-      const msg = STATUS_MESSAGES[status.toUpperCase()];
+      const msg = statusMessageFor(status, row);
       if (msg) {
-        await sendMessage(chatId, `📢 Holatingiz yangilandi:\n\n${msg}`);
+        const isCelebration = normalizeStatus(status).key === 'QABUL QILINDI';
+        await sendMessage(chatId, isCelebration ? msg : `📢 Holatingiz yangilandi:\n\n${msg}`);
         console.log(`Status xabari yuborildi: ${contractId} -> ${status}`);
       }
     }

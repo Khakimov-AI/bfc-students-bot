@@ -84,14 +84,14 @@ const STATUS_RULES = {
   'HUJJAT TAYYOR': { title: 'HUJJATLAR TAYYOR', theme: 'navy', icon: 'doc', next: 'Universitetga topshirish', done: 1, current: 1, currentLabel: 'Hujjatlar tayyor', uni: 'ready' },
   'UNIVERSITY 1 TOPSHIRILDI': { title: 'TOPSHIRILDI', theme: 'yellow', icon: 'clock', next: 'Qabul natijasi', done: 2, current: 2, uni: 'submitted1' },
   'UNIVERSITY 2 TOPSHIRILDI': { title: 'TOPSHIRILDI', theme: 'yellow', icon: 'clock', next: 'Qabul natijasi', done: 2, current: 2, uni: 'submitted2' },
-  'QABUL QILINDI': { title: 'QABUL QILINDI', theme: 'green', icon: 'check', next: 'Kontrakt to‘lovi va viza', done: 4, uni: 'accepted' },
+  'QABUL QILINDI': { title: 'TABRIKLAYMIZ! QABUL QILINDINGIZ', theme: 'green', icon: 'check', next: 'Kontrakt to‘lovi va viza', done: 4, uni: 'accepted', celebrate: true, highlight: 3 },
   'QABUL QILINMADI': { title: 'QABUL QILINMADI', theme: 'red', icon: 'cross', next: 'Yangi reja — supervisor bilan', done: 3, failed: 3, uni: 'none' },
   "KONTRAKT TO'LADI": { title: 'KONTRAKT TO‘LANDI', theme: 'green', icon: 'check', next: 'Viza hujjatlari (KDB)', done: 4, current: 4, currentLabel: 'Viza hujjatlari', uni: 'accepted' },
   "KDB QO'YDI": { title: 'KDB HISOBI OCHILDI', theme: 'blue', icon: 'check', next: 'COA olish', done: 4, current: 4, currentLabel: 'Viza hujjatlari', uni: 'accepted' },
   'COA OLDI': { title: 'COA OLINDI', theme: 'blue', icon: 'check', next: 'Elchixonaga topshirish', done: 4, current: 4, currentLabel: 'Viza hujjatlari', uni: 'accepted' },
   'ELCHIXONA': { title: 'VIZAGA TOPSHIRILDI', theme: 'yellow', icon: 'clock', next: 'Viza natijasi', done: 4, current: 4, currentLabel: 'Viza kutilmoqda', uni: 'accepted' },
   'VISAGA TOPSHIRILDI': { title: 'VIZAGA TOPSHIRILDI', theme: 'yellow', icon: 'clock', next: 'Viza natijasi', done: 4, current: 4, currentLabel: 'Viza kutilmoqda', uni: 'accepted' },
-  'VIZA TASDIQLANDI': { title: 'VIZA TASDIQLANDI', theme: 'green', icon: 'check', next: 'Aviabilet va jo‘nash', done: 5, uni: 'accepted' },
+  'VIZA TASDIQLANDI': { title: 'TABRIKLAYMIZ! VIZA TASDIQLANDI', theme: 'green', icon: 'check', next: 'Aviabilet va jo‘nash', done: 5, uni: 'accepted', celebrate: true, highlight: 4 },
   'VIZA RAD QILINDI': { title: 'VIZA RAD ETILDI', theme: 'red', icon: 'cross', next: 'Keyingi reja — supervisor bilan', done: 4, failed: 4, uni: 'accepted' },
   'SHARTNOMA BEKOR QILDI': { title: 'SHARTNOMA BEKOR QILINGAN', theme: 'gray', icon: 'cross', next: 'Savollar bo‘yicha filialga', done: 0, uni: 'none' },
   'MUZLATDI': { title: 'JARAYON TO‘XTATILGAN', theme: 'gray', icon: 'pause', next: 'Qayta boshlash — filialga', done: 1, uni: 'none' },
@@ -288,25 +288,53 @@ function incomeRows(docCodes, missing, extra = {}) {
 }
 
 // ---------------------------------------------------------------------
+// STATUSNI NORMALLASHTIRISH — DB!D ustunida turli yozilishlar bo'lishi
+// mumkin: "QABUL QILINDI 1", "Qabul qilindi 2", "TO‘LOV QILDI" ...
+// "QABUL QILINDI N" — talaba N-universitetga (H, I, BE ustuni) kirgan.
+// ---------------------------------------------------------------------
+function normalizeStatus(raw) {
+  const t = up(raw).replace(/[‘’`ʻʼ]/g, "'").replace(/\s+/g, ' ').trim();
+  const res = { key: t, acceptedIdx: null, raw: s(raw) };
+  if (!t) return res;
+  let m = t.match(/^QABUL QILINDI\s*-?\s*(\d)?$/);
+  if (m) return { ...res, key: 'QABUL QILINDI', acceptedIdx: m[1] ? Math.max(0, Number(m[1]) - 1) : 0 };
+  if (/QABUL QILINMADI/.test(t)) return { ...res, key: 'QABUL QILINMADI' };
+  m = t.match(/^UNIVERSITY\s*(\d)\s*TOPSHIRILDI/);
+  if (m) return { ...res, key: Number(m[1]) >= 2 ? 'UNIVERSITY 2 TOPSHIRILDI' : 'UNIVERSITY 1 TOPSHIRILDI' };
+  if (/^VI[SZ]AGA TOPSHIRILDI/.test(t)) return { ...res, key: 'VISAGA TOPSHIRILDI' };
+  return res;
+}
+
+function ruleFor(norm) {
+  if (!norm.key) return DEFAULT_RULE;
+  if (STATUS_RULES[norm.key]) return STATUS_RULES[norm.key];
+  // Noma'lum status — DB'dagi matnning o'zi ko'rsatiladi (hech qachon
+  // noto'g'ri bosqich "o'ylab topilmaydi")
+  return { title: up(norm.raw), theme: 'navy', icon: 'doc', next: 'Supervisor bilan bog‘laning', done: 1, unknown: true };
+}
+
+const isParentGone = (...vals) => vals.some((v) => /^(DEAD|DIVORCED)$|VAFOT|AJRASH/i.test(s(v)));
+
+// ---------------------------------------------------------------------
 // MA'LUMOTNI YIG'ISH — sof funksiya (Sheets/Telegram'ga murojaat yo'q)
 // ---------------------------------------------------------------------
 /**
  * @param {Object} src
- *   dbRow: Array, cols: findDbColumns().cols, draft: {A..AW} yoki {},
+ *   dbRow: Array, cols: findDbColumns().cols, draft: {A..AW} (DB qiymatlari ustidan yozilgan),
  *   docCodes: Set(DOCUMENT_LOG kodlari), missingDocs: [{code,label,optional}],
- *   supervisor: {name, phone}, today: Date
+ *   supervisor: {name, phone}, extra: {income, houseDate, carDate}, today: Date
  */
 function buildReportData(src) {
   const { dbRow = [], cols, draft = {}, docCodes = new Set(), missingDocs = [], supervisor = {}, today = new Date(), extra = {} } = src;
   const contractId = up(dbRow[cols.ID] || draft.H);
-  const status = up(dbRow[cols.STATUS]);
-  const rule = STATUS_RULES[status] || DEFAULT_RULE;
+  const norm = normalizeStatus(dbRow[cols.STATUS]);
+  const status = norm.key;
+  const rule = ruleFor(norm);
 
   const programRaw = up((cols.PROGRAM !== null && dbRow[cols.PROGRAM]) || draft.C);
-  const program = PROGRAM_LABEL[programRaw] || titleCase(programRaw) || '';
-  const isMaster = programRaw === 'MAGISTRATURA';
+  const program = PROGRAM_LABEL[programRaw] || niceCase(programRaw) || '';
   const fullName = s(dbRow[cols.FULL_NAME] || draft.I);
-  const name = displayName(fullName) || contractId;
+  const name = fullName || contractId; // DB'da qanday yozilgan bo'lsa — shunday
   const branch = titleCase(dbRow[cols.BRANCH] || '');
   const tarif = niceCase(dbRow[cols.TARIF] || '');
   const cert = certificateText(dbRow, cols, draft);
@@ -314,52 +342,22 @@ function buildReportData(src) {
 
   // --- 1. Talaba haqida
   const about = [];
-  const region = regionText(draft);
-  if (region) about.push(['Viloyat', region]);
   if (age) about.push(['Yoshi', `${age} yosh`]);
-  const gradYear = yearOf(draft.AB);
-  if (isMaster) {
-    if (s(draft.Z)) about.push(['Diplom', `${uzQuote(draft.Z)}${gradYear ? ` (${gradYear})` : ''}`]);
-    if (s(draft.AA)) about.push(['Yo‘nalish', niceCase(draft.AA)]);
-  } else if (s(draft.AC)) {
-    const gpa = up(draft.AC) === 'EXPECTED' ? 'Kutilmoqda' : `${s(draft.AC).replace(',', '.')} / 5`;
-    about.push(['Attestat bali', `${gpa}${gradYear ? ` (${gradYear}-yil)` : ''}`]);
-  }
   about.push(['Sertifikat', cert.text, cert.tone === 'blue' ? 'blue' : 'normal']);
+  const address = uzQuote(draft.W) || titleCase(draft.AD || '');
+  if (address) about.push(['Manzil', address, 'normal', true]);
+  if (s(draft.AC)) about.push(['Baho (GPA)', up(draft.AC) === 'EXPECTED' ? 'Kutilmoqda' : s(draft.AC).replace(',', '.')]);
   const goal = GOAL_LABEL[up(draft.AP)] || niceCase(draft.AP);
   const cityRaw = up(draft.AQ);
   const city = CITY_LABEL[cityRaw] !== undefined ? CITY_LABEL[cityRaw] : titleCase(draft.AQ);
   if (goal || city) about.push(['Maqsadi', [goal, city].filter(Boolean).join(' · ')]);
 
-  // --- 2. Shartnoma (+ supervisor kontakti)
-  const contract = [];
-  if (tarif) contract.push(['Tarif', tarif]);
-  if (program) contract.push(['Dastur', program]);
-  if (branch) contract.push(['Filial', branch]);
-  if (supervisor.name) contract.push(['Supervisor', titleCase(supervisor.name)]);
-  if (supervisor.phone) contract.push(['Telefon', supervisor.phone, 'blue']);
-
-  // --- 3. Otkaz
-  const rejection = rejectionInfo(draft);
-
-  // --- 4. Ota-ona
-  const parents = [];
-  const fatherJob = parentJob(draft.AL || (PARENT_STATUS[up(draft.AJ)] ? draft.AJ : ''));
-  const motherJob = parentJob(draft.AO || (PARENT_STATUS[up(draft.AM)] ? draft.AM : ''));
-  parents.push(['Ota', fatherJob]);
-  parents.push(['Ona', motherJob]);
-  const missingCodes = missingDocs.map((m) => m.code);
-  for (const r of incomeRows(docCodes, missingCodes, extra)) parents.push(r);
-
-  // --- 5. Universitetlar
-  const uniNames = [dbRow[cols.UNIVERSITY_1], dbRow[cols.UNIVERSITY_2], dbRow[cols.UNIVERSITY_3]].map(s).filter(Boolean);
-  let acceptedIdx = 0;
-  if (cols.ACCEPTED_UNI !== null && s(dbRow[cols.ACCEPTED_UNI])) {
-    const acc = s(dbRow[cols.ACCEPTED_UNI]).toLowerCase();
-    const i = uniNames.findIndex((u) => acc.includes(u.toLowerCase()) || u.toLowerCase().includes(acc));
-    if (i !== -1) acceptedIdx = i;
-  }
-  const universities = uniNames.map((n, i) => {
+  // --- Universitetlar (1-bo'lim ichida)
+  const uniNames = [dbRow[cols.UNIVERSITY_1], dbRow[cols.UNIVERSITY_2], dbRow[cols.UNIVERSITY_3]].map(s);
+  const acceptedIdx = norm.acceptedIdx !== null ? norm.acceptedIdx : 0;
+  const universities = [];
+  uniNames.forEach((n, i) => {
+    if (!n) return;
     let pill = null; let style = 'plain'; let choice = `${i + 1}-tanlov${program ? ` · ${program}` : ''}`;
     switch (rule.uni) {
       case 'ready':
@@ -380,19 +378,44 @@ function buildReportData(src) {
       default:
         pill = { text: 'TANLANGAN', theme: 'gray' };
     }
-    return { name: universityTitle(n), kr: universityKr(n), choice, pill, style };
+    universities.push({ name: universityTitle(n), kr: universityKr(n), choice, pill, style, index: i });
   });
-  const submittedStage = ['submitted1', 'submitted2', 'accepted'].includes(rule.uni) || status === 'QABUL QILINMADI';
-  const uniTitle = universities.length > 1
-    ? (submittedStage ? 'Qaysi universitetlarga topshirildi' : 'Qaysi universitetlarga topshiriladi')
-    : (submittedStage ? 'Qaysi universitetga topshirildi' : 'Qaysi universitetga topshiriladi');
+  const acceptedUni = universities.find((u) => u.index === acceptedIdx) || universities[0];
+
+  // --- 2. Shartnoma
+  const contract = [];
+  if (tarif) contract.push(['Tarif', tarif]);
+  if (program) contract.push(['Dastur', program]);
+  if (supervisor.name) contract.push(['Supervisor', titleCase(supervisor.name)]);
+  if (supervisor.phone) contract.push(['Supervisor telefon raqami', supervisor.phone, 'blue']);
+  if (branch) contract.push(['Filial', branch]);
+
+  // --- 3. Ota-ona — faqat berilgan ma'lumot; vafot etgan/ajrashgan yozilmaydi
+  const parents = [];
+  if (!isParentGone(draft.AJ, draft.AL) && s(draft.AL)) parents.push(['Ota', niceCase(draft.AL)]);
+  if (!isParentGone(draft.AM, draft.AO) && s(draft.AO)) parents.push(['Ona', niceCase(draft.AO)]);
+  if (s(extra.income)) parents.push(['Yillik daromad', niceCase(extra.income)]);
+  else if (docCodes.has('FATHER_INCOME') || docCodes.has('MOTHER_INCOME')) parents.push(['Yillik daromad', 'Hujjat topshirilgan', 'green']);
+  else if (docCodes.has('NO_ASSETS')) parents.push(['Yillik daromad', 'Mavjud emas']);
+  const assets = [];
+  if (s(extra.houseDate)) assets.push(`Uy (${yearOf(extra.houseDate) || s(extra.houseDate)})`);
+  else if (docCodes.has('HOUSE_KADASTR')) assets.push('Uy');
+  if (s(extra.carDate)) assets.push(`mashina (${yearOf(extra.carDate) || s(extra.carDate)})`);
+  else if (docCodes.has('CAR_TECH')) assets.push('mashina');
+  if (assets.length) {
+    const txt = assets.join(' + ');
+    parents.push(['Mulk', txt.charAt(0).toUpperCase() + txt.slice(1)]);
+  }
+
+  // --- 4. Rad javobi (otkaz) tarixi — ma'lumot bo'lmasa bo'lim chiqmaydi
+  const rej = rejectionInfo(draft);
+  const rejection = rej.state === 'unknown' ? null : rej;
 
   // --- Banner kichik qatori
   let bannerSub;
   const uniJoined = universities.map((u) => u.name.replace(/\s+University$/i, '')).join(' va ');
-  if (rule.uni === 'accepted' && universities[acceptedIdx]) {
-    const u = universities[acceptedIdx];
-    bannerSub = `${u.name}${u.kr ? ` (${u.kr})` : ''}${program ? ` · ${program} dasturi` : ''}`;
+  if (rule.uni === 'accepted' && acceptedUni) {
+    bannerSub = `${acceptedUni.name}${acceptedUni.kr ? ` (${acceptedUni.kr})` : ''}${program ? ` · ${program} dasturi` : ''}`;
   } else if ((rule.uni === 'submitted1' || rule.uni === 'submitted2') && universities.length) {
     const list = rule.uni === 'submitted1' ? universities[0].name : uniJoined;
     bannerSub = `${list} ${rule.uni === 'submitted2' && universities.length > 1 ? 'universitetlariga' : 'universitetiga'}${program ? ` · ${program}` : ''}`;
@@ -409,35 +432,29 @@ function buildReportData(src) {
     if (rule.current === i) state = 'current';
     if (rule.failed === i) state = 'failed';
     const lbl = rule.current === i && rule.currentLabel ? rule.currentLabel : label;
-    return { label: lbl, state };
+    return { label: lbl, state, highlight: rule.highlight === i };
   });
 
-  // --- E-viza eslatmasi
   const eviza = /E-?\s?VIZA/i.test(tarif)
     ? 'Viza Koreyaning o‘zidan olinadi — sertifikat va ota-onaning yillik daromadi talab qilinmaydi.'
     : '';
 
-  // --- Yetishmayotgan hujjatlar (faqat hujjat bosqichlarida)
   const docStage = !['QABUL QILINMADI', 'SHARTNOMA BEKOR QILDI', 'MUZLATDI', 'VIZA TASDIQLANDI', 'VIZA RAD QILINDI'].includes(status);
   const missing = docStage ? missingDocs : [];
 
-  // --- Xulosa (shablon)
-  const summary = buildSummary({ status, rule, universities, acceptedIdx, program, cert, missing });
-
-  const subtitleParts = [`Shartnoma № ${contractId}`];
-  if (program) subtitleParts.push(`${program} dasturi`);
-  if (branch) subtitleParts.push(`${branch} filiali`);
+  const summary = buildSummary({ status, rule, universities, acceptedUni, program, cert, missing });
 
   return {
-    contractId, status, name, initials: initialsOf(name), subtitle: subtitleParts.join(' · '),
-    banner: { title: rule.title, sub: bannerSub, theme: rule.theme, icon: rule.icon, next: rule.next },
-    about, contract, rejection, parents, universities, uniTitle, eviza, progress,
+    contractId, status, statusRaw: norm.raw, name, initials: initialsOf(name),
+    banner: { title: rule.title, sub: bannerSub, theme: rule.theme, icon: rule.icon, next: rule.next, celebrate: !!rule.celebrate },
+    about, contract, rejection, parents, universities, eviza, progress,
     progressTheme: rule.theme, missing, summary,
+    acceptedUniName: rule.uni === 'accepted' && acceptedUni ? acceptedUni.name : '',
     dateText: formatDate(today),
   };
 }
 
-function buildSummary({ status, universities, acceptedIdx, program, cert, missing }) {
+function buildSummary({ status, rule, universities, acceptedUni, program, cert, missing }) {
   const prog = program ? program.toLowerCase() : '';
   const certPhrase = cert.has ? `${cert.text} sertifikati bilan ` : '';
   const shortName = (n) => n.replace(/\s+University$/i, '');
@@ -448,8 +465,10 @@ function buildSummary({ status, universities, acceptedIdx, program, cert, missin
     : '';
   switch (status) {
     case 'QABUL QILINDI': {
-      const u = universities[acceptedIdx];
-      return `Tabriklaymiz! ${certPhrase}${u ? u.name : 'universitet'}${prog ? ` ${prog} dasturiga` : 'ga'} qabul qilindingiz. Keyingi qadam — kontrakt to‘lovi va viza hujjatlarini tayyorlash.`;
+      const u = acceptedUni ? acceptedUni.name : 'universitet';
+      return `Tabriklaymiz, siz ${certPhrase}${u}${prog ? ` ${prog} dasturiga` : 'ga'} qabul qilindingiz! `
+        + 'Bu — sizning mehnatingiz va qat’iyatingiz natijasi. Koreyadagi talabalik hayotingiz endi juda yaqin. '
+        + 'Keyingi qadam — kontrakt to‘lovi va viza hujjatlari. Bu yo‘lda biz siz bilan birgamiz!';
     }
     case 'UNIVERSITY 1 TOPSHIRILDI':
     case 'UNIVERSITY 2 TOPSHIRILDI':
@@ -467,12 +486,12 @@ function buildSummary({ status, universities, acceptedIdx, program, cert, missin
     case "KONTRAKT TO'LADI":
     case "KDB QO'YDI":
     case 'COA OLDI':
-      return `Universitet bosqichi yakunlandi, hozir viza hujjatlari tayyorlanmoqda.${missSentence}`;
+      return `Universitet bosqichi muvaffaqiyatli yakunlandi, hozir viza hujjatlari tayyorlanmoqda.${missSentence}`;
     case 'ELCHIXONA':
     case 'VISAGA TOPSHIRILDI':
       return 'Hujjatlaringiz elchixonaga topshirildi. Ko‘rib chiqish odatda 2 haftadan 1 oygacha davom etadi — natija chiqishi bilan xabar beramiz.';
     case 'VIZA TASDIQLANDI':
-      return 'Tabriklaymiz! Vizangiz tasdiqlandi. Keyingi qadam — aviabilet va jo‘nashga tayyorgarlik. Supervisoringiz batafsil ma’lumot beradi.';
+      return 'Tabriklaymiz, vizangiz tasdiqlandi! Koreya sizni kutmoqda. Keyingi qadam — aviabilet va jo‘nashga tayyorgarlik, supervisoringiz har bir qadamda yoningizda.';
     case 'QABUL QILINMADI':
       return 'Bu safar qabul natijasi ijobiy bo‘lmadi. Supervisoringiz siz bilan bog‘lanib, boshqa universitet yoki keyingi semestr variantlarini muhokama qiladi.';
     case 'VIZA RAD QILINDI':
@@ -482,6 +501,7 @@ function buildSummary({ status, universities, acceptedIdx, program, cert, missin
     case 'MUZLATDI':
       return 'Jarayoningiz vaqtincha to‘xtatilgan. Qayta boshlash uchun supervisoringiz yoki filialingizga murojaat qiling.';
     default:
+      if (rule && rule.unknown) return `Joriy bosqichingiz: ${status.charAt(0) + status.slice(1).toLowerCase()}.${missSentence || ' Batafsil ma’lumot uchun supervisoringizga murojaat qiling.'}`;
       return `Ma’lumotlaringiz qabul qilindi.${missSentence || ' Supervisoringiz keyingi qadamlar bo‘yicha siz bilan bog‘lanadi.'}`;
   }
 }
@@ -562,20 +582,43 @@ function sectionTitle(doc, text, x, y) {
   doc.font('XB').fontSize(9).fillColor(C.navy).text(text, x, y, { lineBreak: false });
 }
 
-function kvRows(doc, rows, x, y, w, rowH = 19.5) {
-  rows.forEach(([k, v, tone], i) => {
-    const ry = y + i * rowH;
-    doc.font('R').fontSize(8.2).fillColor(C.label).text(k, x, ry + 5, { lineBreak: false });
-    const color = tone === 'blue' ? C.blue : tone === 'green' ? C.green : tone === 'red' ? C.red : tone === 'orange' ? C.orange : C.text;
+const LABEL_SIZE = 8.2;
+const VALUE_SIZE = 8.6;
+
+/** Qatorlar balandligini oldindan hisoblaydi (uzun manzil 2-3 qatorga o'raladi). */
+function layoutKv(doc, rows, w, rowH) {
+  return rows.map(([k, v, tone, wrap]) => {
+    const val = s(v);
     const font = tone && tone !== 'normal' ? 'B' : 'SB';
-    const maxW = w - doc.font('R').fontSize(8.2).widthOfString(k) - 12;
-    const sz = fitText(doc, s(v), font, 8.6, maxW, 6.5);
-    doc.font(font).fontSize(sz).fillColor(color).text(s(v), x, ry + 5 + (8.6 - sz) / 2, { width: w, align: 'right', lineBreak: false });
-    if (i < rows.length - 1) {
-      doc.moveTo(x, ry + rowH - 0.5).lineTo(x + w, ry + rowH - 0.5).lineWidth(0.5).strokeColor(C.line).stroke();
+    const labelW = doc.font('R').fontSize(LABEL_SIZE).widthOfString(k);
+    const maxW = w - labelW - 12;
+    let size = fitText(doc, val, font, VALUE_SIZE, maxW, wrap ? 7.6 : 6.5);
+    let lines = 1;
+    if (wrap && doc.font(font).fontSize(size).widthOfString(val) > maxW) {
+      size = 7.8;
+      lines = Math.min(3, Math.ceil(doc.font(font).fontSize(size).heightOfString(val, { width: maxW }) / (size * 1.25)));
     }
+    const h = lines > 1 ? rowH + (lines - 1) * 10 : rowH;
+    return { k, val, tone, font, size, maxW, lines, h };
   });
-  return rows.length * rowH;
+}
+
+function drawKv(doc, laid, x, y, w) {
+  let ry = y;
+  laid.forEach((it, i) => {
+    doc.font('R').fontSize(LABEL_SIZE).fillColor(C.label).text(it.k, x, ry + 5, { lineBreak: false });
+    const color = it.tone === 'blue' ? C.blue : it.tone === 'green' ? C.green : it.tone === 'red' ? C.red : it.tone === 'orange' ? C.orange : C.text;
+    if (it.lines > 1) {
+      doc.font(it.font).fontSize(it.size).fillColor(color)
+        .text(it.val, x + w - it.maxW, ry + 5, { width: it.maxW, align: 'right', lineGap: 1.2, height: it.h - 6, ellipsis: true });
+    } else {
+      doc.font(it.font).fontSize(it.size).fillColor(color)
+        .text(it.val, x, ry + 5 + (VALUE_SIZE - it.size) / 2, { width: w, align: 'right', lineBreak: false });
+    }
+    ry += it.h;
+    if (i < laid.length - 1) doc.moveTo(x, ry - 0.5).lineTo(x + w, ry - 0.5).lineWidth(0.5).strokeColor(C.line).stroke();
+  });
+  return ry - y;
 }
 
 /**
@@ -604,12 +647,12 @@ function isImage(buf) {
   return (buf[0] === 0xFF && buf[1] === 0xD8) || (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47);
 }
 
-// Sahifaga sig'maslik xavfi bo'lsa (ko'p hujjat yetishmasa va h.k.) —
-// avval o'lchab ko'riladi, keyin ixchamroq joylashuv tanlanadi.
+// Sahifaga sig'maslik xavfi bo'lsa — avval o'lchab ko'riladi, keyin
+// ixchamroq joylashuv tanlanadi (doim 1 varaq).
 const LEVELS = [
-  { rowH: 19.5, gap: 10, sectionGap: 14, uniH: 40, uniGap: 7, photoW: 54, photoH: 72, nameSize: 24, bannerH: 52, missCols: 2, lineH: 12.5, sumSize: 9.6 },
-  { rowH: 17.5, gap: 8, sectionGap: 11, uniH: 35, uniGap: 6, photoW: 48, photoH: 64, nameSize: 22, bannerH: 48, missCols: 2, lineH: 11.5, sumSize: 9.2 },
-  { rowH: 16, gap: 7, sectionGap: 9, uniH: 32, uniGap: 5, photoW: 42, photoH: 56, nameSize: 20, bannerH: 44, missCols: 3, lineH: 11, sumSize: 8.8 },
+  { rowH: 19.5, gap: 10, uniH: 34, photoW: 78, photoH: 104, nameSize: 22, bannerH: 54, missCols: 2, lineH: 12.5, sumSize: 9.6 },
+  { rowH: 17.5, gap: 8, uniH: 31, photoW: 72, photoH: 96, nameSize: 20, bannerH: 50, missCols: 2, lineH: 11.5, sumSize: 9.2 },
+  { rowH: 16, gap: 7, uniH: 29, photoW: 66, photoH: 88, nameSize: 18, bannerH: 46, missCols: 3, lineH: 11, sumSize: 8.8 },
 ];
 const FOOTER_Y = PAGE.h - 34;
 
@@ -625,17 +668,79 @@ function chooseLevel(r, photo) {
   return LEVELS.length - 1;
 }
 
+/** Qabul/viza tabrigi uchun bannerga konfetti (vektor, rang-barang). */
+function confetti(doc, x0, y0, w, h) {
+  const colors = [C.yellow, '#FFFFFF', '#8FE3B4', '#FFB4A8', '#A9C1FF'];
+  let seed = 7;
+  const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+  for (let i = 0; i < 26; i++) {
+    const x = x0 + rnd() * w; const y = y0 + rnd() * h;
+    const c = colors[i % colors.length];
+    doc.save().fillOpacity(0.9).fillColor(c);
+    if (i % 3 === 0) doc.circle(x, y, 1.6 + rnd() * 1.2).fill();
+    else doc.rotate(rnd() * 90, { origin: [x, y] }).rect(x, y, 2.2, 5).fill();
+    doc.restore();
+  }
+}
+
+function drawProgress(doc, r, x, y, w) {
+  const segGap = 5;
+  const segW = (w - segGap * 4) / 5;
+  const curColor = { green: C.green, yellow: C.yellow, navy: C.blue, blue: C.blue, red: C.red, gray: C.gray }[r.progressTheme] || C.blue;
+  r.progress.forEach((p, i) => {
+    const sx = x + i * (segW + segGap);
+    const color = p.highlight ? C.green : p.state === 'done' ? C.navy : p.state === 'current' ? curColor : p.state === 'failed' ? C.red : C.track;
+    doc.roundedRect(sx, y, segW, 5, 2.5).fill(color);
+    const ly2 = y + 10;
+    const txtColor = p.highlight ? C.green : p.state === 'todo' ? '#8E8A7E' : p.state === 'current' ? (curColor === C.yellow ? C.yellowDark : curColor) : p.state === 'failed' ? C.red : C.navy;
+    let off = 0;
+    if (p.state === 'done') {
+      doc.save().lineWidth(1.3).strokeColor(txtColor)
+        .moveTo(sx + 0.5, ly2 + 4.5).lineTo(sx + 3, ly2 + 7).lineTo(sx + 7.5, ly2 + 1.5).stroke().restore();
+      off = 11;
+    } else if (p.state === 'current') {
+      doc.circle(sx + 3.5, ly2 + 4.3, 3.2).fill(txtColor);
+      off = 10;
+    } else if (p.state === 'failed') {
+      doc.save().lineWidth(1.3).strokeColor(C.red)
+        .moveTo(sx + 1, ly2 + 1.5).lineTo(sx + 6.5, ly2 + 7).moveTo(sx + 6.5, ly2 + 1.5).lineTo(sx + 1, ly2 + 7).stroke().restore();
+      off = 10;
+    }
+    const f = p.state === 'todo' ? 'M' : 'SB';
+    const lsz = fitText(doc, p.label, f, 8.2, segW - off - 2, 6);
+    doc.font(f).fontSize(lsz).fillColor(txtColor).text(p.label, sx + off, ly2 + (8.2 - lsz) / 2, { lineBreak: false });
+  });
+  return 24;
+}
+
+function smallPill(doc, text, xRight, y, theme) {
+  const t = {
+    green: [C.green, C.white], yellow: [C.yellow, C.navy], navy: [C.navy, C.white], red: [C.red, C.white],
+    gray: [C.pillGray, '#5E5B52'], blue: [C.blue, C.white],
+  }[theme] || [C.pillGray, C.navy];
+  doc.font('XB').fontSize(6.6);
+  const w = doc.widthOfString(text) + 11;
+  const h = 14;
+  doc.roundedRect(xRight - w, y, w, h, 3.5).fill(t[0]);
+  doc.fillColor(t[1]).text(text, xRight - w, y + 4, { width: w, align: 'center', lineBreak: false });
+  return w;
+}
+
 function draw(doc, r, photo, L = LEVELS[0]) {
   const M = PAGE.m;
   const W = PAGE.w - 2 * M;
   let y = 26;
 
-  // ---- Sarlavha
+  // ---- Sarlavha: logo + "Shartnoma raqami: ..."
   try { doc.image(LOGO_PATH, M, y + 1, { height: 15 }); } catch (e) { /* logo yo'q bo'lsa ham davom */ }
   doc.font('XB').fontSize(9).fillColor(C.navy).text('BRIGHT FUTURE', M + 37, y, { characterSpacing: 0.8, lineBreak: false });
   doc.font('R').fontSize(7.5).fillColor(C.label).text(`Shaxsiy hisobot · ${r.dateText}`, M + 37, y + 11.5, { lineBreak: false });
-  const idSize = fitText(doc, `№ ${r.contractId}`, 'XB', 13, 200);
-  doc.font('XB').fontSize(idSize).fillColor(C.navy).text(`№ ${r.contractId}`, M, y + 4, { width: W, align: 'right', lineBreak: false });
+  const idSize = fitText(doc, r.contractId, 'XB', 13, 170);
+  const idW = doc.font('XB').fontSize(idSize).widthOfString(r.contractId);
+  doc.font('XB').fontSize(idSize).fillColor(C.navy).text(r.contractId, M + W - idW, y + 4, { lineBreak: false });
+  const lbl = 'Shartnoma raqami:';
+  const lblW = doc.font('R').fontSize(8.5).widthOfString(lbl);
+  doc.font('R').fontSize(8.5).fillColor(C.label).text(lbl, M + W - idW - 6 - lblW, y + 4 + (idSize - 8.5) * 0.75, { lineBreak: false });
   y += 30;
   doc.moveTo(M, y).lineTo(M + W, y).lineWidth(1.2).strokeColor(C.navy).stroke();
   y += 12;
@@ -648,98 +753,129 @@ function draw(doc, r, photo, L = LEVELS[0]) {
   drawIcon(doc, r.banner.icon, M + 27, y + bh / 2, 13, th.fg);
   const titleMaxW = W - 54 - 135;
   const tsz = fitText(doc, r.banner.title, 'XB', 18, titleMaxW, 11);
-  doc.font('XB').fontSize(tsz).fillColor(th.fg).text(r.banner.title, M + 50, y + 9 + (18 - tsz) / 2, { lineBreak: false });
+  doc.font('XB').fontSize(tsz).fillColor(th.fg).text(r.banner.title, M + 50, y + bh / 2 - 17 + (18 - tsz) / 2, { lineBreak: false });
+  if (r.banner.celebrate) {
+    // Konfetti faqat sarlavha matni bilan "Keyingi bosqich" orasidagi bo'sh joyga
+    const titleEnd = M + 50 + Math.max(doc.font('XB').fontSize(tsz).widthOfString(r.banner.title),
+      doc.font('M').fontSize(8.5).widthOfString(r.banner.sub || '')) + 12;
+    const zoneW = (M + W - 145) - titleEnd;
+    if (zoneW > 25) {
+      doc.save().roundedRect(M, y, W, bh, 10).clip();
+      confetti(doc, titleEnd, y + 5, zoneW, bh - 10);
+      doc.restore();
+    }
+  }
   const subSz = fitText(doc, r.banner.sub || '', 'M', 8.5, titleMaxW, 6.5);
-  doc.font('M').fontSize(subSz).fillColor(th.fg).text(r.banner.sub || '', M + 50, y + 32, { lineBreak: false });
-  doc.font('SB').fontSize(7.5).fillColor(th.fg).text('Keyingi bosqich:', M + W - 140, y + 15, { width: 128, align: 'right', lineBreak: false });
+  doc.font('M').fontSize(subSz).fillColor(th.fg).text(r.banner.sub || '', M + 50, y + bh / 2 + 6, { lineBreak: false });
+  doc.font('SB').fontSize(7.5).fillColor(th.fg).text('Keyingi bosqich:', M + W - 140, y + bh / 2 - 12, { width: 128, align: 'right', lineBreak: false });
   const nextSz = fitText(doc, r.banner.next, 'B', 8.5, 128, 6.5);
-  doc.font('B').fontSize(nextSz).fillColor(th.fg).text(r.banner.next, M + W - 140, y + 27, { width: 128, align: 'right', lineBreak: false });
-  y += bh + L.gap;
+  doc.font('B').fontSize(nextSz).fillColor(th.fg).text(r.banner.next, M + W - 140, y + bh / 2, { width: 128, align: 'right', lineBreak: false });
+  y += bh + L.gap + 2;
 
-  // ---- Ism + 3x4 rasm (o'ng burchakda)
-  const hasPhoto = isImage(photo);
+  // ---- Ism (DB'dagidek) + jarayon chizig'i | o'ng burchakda 3x4 rasm
   const photoW = L.photoW; const photoH = L.photoH;
-  const nameX = hasPhoto ? M : M + 50;
-  const nameRowH = hasPhoto ? photoH : 46;
-  if (hasPhoto) {
-    const px = M + W - photoW;
+  const px = M + W - photoW;
+  if (isImage(photo)) {
     doc.save();
-    doc.roundedRect(px, y, photoW, photoH, 6).clip();
+    doc.roundedRect(px, y, photoW, photoH, 7).clip();
     try { doc.image(photo, px, y, { cover: [photoW, photoH], align: 'center', valign: 'center' }); } catch (e) { doc.rect(px, y, photoW, photoH).fill(C.card); }
     doc.restore();
-    doc.roundedRect(px, y, photoW, photoH, 6).lineWidth(1).strokeColor(C.line).stroke();
+    doc.roundedRect(px, y, photoW, photoH, 7).lineWidth(1).strokeColor(C.line).stroke();
   } else {
-    doc.circle(M + 21, y + 21, 21).fill(C.navy);
-    const isz = fitText(doc, r.initials, 'XB', 13, 34);
-    doc.font('XB').fontSize(isz).fillColor(C.white).text(r.initials, M, y + 21 - isz * 0.62, { width: 42, align: 'center', lineBreak: false });
+    doc.roundedRect(px, y, photoW, photoH, 7).fill(C.navy);
+    const isz = fitText(doc, r.initials, 'XB', 24, photoW - 14);
+    doc.font('XB').fontSize(isz).fillColor(C.white).text(r.initials, px, y + photoH / 2 - isz * 0.62, { width: photoW, align: 'center', lineBreak: false });
   }
-  const nameMaxW = W - (hasPhoto ? photoW + 14 : 50);
-  const nsz = fitText(doc, r.name, 'XB', L.nameSize, nameMaxW, 14);
-  const nameY = hasPhoto ? y + photoH / 2 - 22 : y + 1;
-  doc.font('XB').fontSize(nsz).fillColor(C.navy).text(r.name, nameX, nameY, { lineBreak: false });
-  const ssz = fitText(doc, r.subtitle, 'R', 9, nameMaxW, 7);
-  doc.font('R').fontSize(ssz).fillColor(C.label).text(r.subtitle, nameX, nameY + nsz + 5, { lineBreak: false });
-  y += nameRowH + L.gap + 2;
+  const leftW = W - photoW - 16;
+  let nsz = fitText(doc, r.name, 'XB', L.nameSize, leftW, 15);
+  let nameH;
+  doc.font('XB').fontSize(nsz);
+  if (doc.widthOfString(r.name) > leftW) {
+    nsz = 15;
+    nameH = Math.min(doc.fontSize(nsz).heightOfString(r.name, { width: leftW, lineGap: 1 }), nsz * 2.6);
+    doc.fillColor(C.navy).text(r.name, M, y + 2, { width: leftW, lineGap: 1, height: nameH, ellipsis: true });
+  } else {
+    nameH = nsz * 1.2;
+    doc.fillColor(C.navy).text(r.name, M, y + 2, { lineBreak: false });
+  }
+  let ly = y + 2 + nameH + 10;
+  doc.font('XB').fontSize(8.5).fillColor(C.navy).text('Jarayon qayerda', M, ly, { lineBreak: false });
+  ly += 14;
+  ly += drawProgress(doc, r, M, ly, leftW);
+  y = Math.max(y + photoH, ly) + L.gap + 4;
 
-  // ---- 4 ta karta (2 ustun)
+  // ---- Kartalar: chapda 1 (talaba + universitetlar), o'ngda 2, 3, 4
   const gap = 12;
   const colW = (W - gap) / 2;
   const pad = 12;
-  const rowH = L.rowH;
   const head = 24;
+  const innerW = colW - 2 * pad;
   const leftX = M; const rightX = M + colW + gap;
+  let num = 1;
 
-  // Chap: 1 · Talaba haqida, 2 · Shartnoma
-  let ly = y;
-  const c1h = head + r.about.length * rowH + 8;
-  card(doc, leftX, ly, colW, c1h);
-  sectionTitle(doc, '1 · Talaba haqida', leftX + pad, ly + 11);
-  kvRows(doc, r.about, leftX + pad, ly + head + 2, colW - 2 * pad, rowH);
-  ly += c1h + L.gap;
-  const c2rows = r.contract.length ? r.contract : [['Shartnoma', '—']];
-  const c2h = head + c2rows.length * rowH + 8;
-  card(doc, leftX, ly, colW, c2h);
-  sectionTitle(doc, '2 · Shartnoma', leftX + pad, ly + 11);
-  kvRows(doc, c2rows, leftX + pad, ly + head + 2, colW - 2 * pad, rowH);
-  ly += c2h;
-
-  // O'ng: 3 · Otkaz, 4 · Ota-ona
-  let ry = y;
-  const rej = r.rejection;
-  doc.font('R').fontSize(8.6);
-  const rejTextH = doc.heightOfString(rej.text, { width: colW - 2 * pad, lineGap: 1.5 });
-  const c3h = head + 22 + rejTextH + 12;
-  card(doc, rightX, ry, colW, c3h);
-  sectionTitle(doc, '3 · Otkaz (rad javobi) tarixi', rightX + pad, ry + 11);
-  const pt = rej.state === 'yes' ? ['BOR', 'red'] : rej.state === 'no' ? ['YO‘Q', 'green'] : ['NOMA’LUM', 'gray'];
-  pill(doc, pt[0], rightX + pad, ry + head + 2, pt[1]);
-  doc.font('R').fontSize(8.6).fillColor(C.text).text(rej.text, rightX + pad, ry + head + 25, { width: colW - 2 * pad, lineGap: 1.5 });
-  ry += c3h + L.gap;
-  const c4h = head + r.parents.length * rowH + 8;
-  card(doc, rightX, ry, colW, c4h);
-  sectionTitle(doc, '4 · Ota-ona daromadi', rightX + pad, ry + 11);
-  kvRows(doc, r.parents, rightX + pad, ry + head + 2, colW - 2 * pad, rowH);
-  ry += c4h;
-  y = Math.max(ly, ry) + L.sectionGap;
-
-  // ---- 5 · Universitetlar
-  sectionTitle(doc, `5 · ${r.uniTitle}`, M, y);
-  y += 15;
-  const unis = r.universities.length ? r.universities : [{ name: 'Universitet hali tanlanmagan', kr: '', choice: 'Supervisoringiz siz bilan birga tanlaydi', pill: null, style: 'plain' }];
-  const uh = L.uniH;
+  // 1 · Talaba haqida
+  const aboutLaid = layoutKv(doc, r.about, innerW, L.rowH);
+  const aboutH = aboutLaid.reduce((a, b) => a + b.h, 0);
+  const unis = r.universities;
+  const uniBlockH = unis.length ? 8 + unis.length * (L.uniH + 4) : 0;
+  const c1h = head + aboutH + uniBlockH + 8;
+  card(doc, leftX, y, colW, c1h);
+  sectionTitle(doc, `${num++} · Talaba haqida`, leftX + pad, y + 11);
+  drawKv(doc, aboutLaid, leftX + pad, y + head + 2, innerW);
+  let uy = y + head + 2 + aboutH + 6;
   for (const u of unis) {
-    const fill = u.style === 'yellow' ? C.yellowSoft : C.white;
+    const fill = u.style === 'green' ? C.greenSoft : u.style === 'yellow' ? C.yellowSoft : C.white;
     const border = u.style === 'green' ? C.green : u.style === 'yellow' ? C.yellow : C.line;
-    doc.roundedRect(M, y, W, uh, 9).fill(fill);
-    doc.roundedRect(M + 0.5, y + 0.5, W - 1, uh - 1, 9).lineWidth(u.style === 'plain' ? 0.8 : 1.4).strokeColor(border).stroke();
+    doc.roundedRect(leftX + pad - 4, uy, innerW + 8, L.uniH, 7).fill(fill);
+    doc.roundedRect(leftX + pad - 3.5, uy + 0.5, innerW + 7, L.uniH - 1, 7).lineWidth(u.style === 'plain' ? 0.7 : 1.1).strokeColor(border).stroke();
+    const pillW = u.pill ? smallPill(doc, u.pill.text, leftX + pad + innerW - 4, uy + L.uniH / 2 - 7, u.pill.theme) : 0;
     const nameTxt = u.kr ? `${u.name} · ${u.kr}` : u.name;
-    const pillSpace = u.pill ? 150 : 20;
-    const usz = fitText(doc, nameTxt, 'B', 11.5, W - 28 - pillSpace, 8);
-    doc.font('B').fontSize(usz).fillColor(C.navy).text(nameTxt, M + 14, y + (uh > 38 ? 8 : 6), { lineBreak: false });
-    doc.font('R').fontSize(7.8).fillColor(C.label).text(u.choice, M + 14, y + (uh > 38 ? 24 : 21), { lineBreak: false });
-    if (u.pill) pill(doc, u.pill.text, M + W - 14, y + uh / 2 - 8.5, u.pill.theme, 'right');
-    y += uh + L.uniGap;
+    const textW = innerW - pillW - 10;
+    const usz = fitText(doc, nameTxt, 'B', 9.5, textW, 6.8);
+    const shown = doc.font('B').fontSize(usz).widthOfString(nameTxt) <= textW ? nameTxt : u.name;
+    const usz2 = fitText(doc, shown, 'B', 9.5, textW, 6.8);
+    doc.font('B').fontSize(usz2).fillColor(C.navy).text(shown, leftX + pad + 2, uy + L.uniH / 2 - 10, { width: textW, lineBreak: false, ellipsis: true });
+    doc.font('R').fontSize(7.3).fillColor(C.label).text(u.choice, leftX + pad + 2, uy + L.uniH / 2 + 2.5, { width: textW, lineBreak: false, ellipsis: true });
+    uy += L.uniH + 4;
   }
+  const leftBottom = y + c1h;
+
+  // O'ng ustun
+  let ry = y;
+  // 2 · Shartnoma
+  const c2rows = r.contract.length ? r.contract : [['Shartnoma', '—']];
+  const c2Laid = layoutKv(doc, c2rows, innerW, L.rowH);
+  const c2h = head + c2Laid.reduce((a, b) => a + b.h, 0) + 8;
+  card(doc, rightX, ry, colW, c2h);
+  sectionTitle(doc, `${num++} · Shartnoma`, rightX + pad, ry + 11);
+  drawKv(doc, c2Laid, rightX + pad, ry + head + 2, innerW);
+  ry += c2h + L.gap;
+
+  // 3 · Ota-ona (faqat ma'lumot bo'lsa)
+  if (r.parents.length) {
+    const pLaid = layoutKv(doc, r.parents, innerW, L.rowH);
+    const c3h = head + pLaid.reduce((a, b) => a + b.h, 0) + 8;
+    card(doc, rightX, ry, colW, c3h);
+    sectionTitle(doc, `${num++} · Ota-ona`, rightX + pad, ry + 11);
+    drawKv(doc, pLaid, rightX + pad, ry + head + 2, innerW);
+    ry += c3h + L.gap;
+  }
+
+  // 4 · Rad javobi (otkaz) tarixi (faqat ma'lumot bo'lsa)
+  if (r.rejection) {
+    const rej = r.rejection;
+    doc.font('R').fontSize(8.6);
+    const rejTextH = doc.heightOfString(rej.text, { width: innerW, lineGap: 1.5 });
+    const c4h = head + 22 + rejTextH + 12;
+    card(doc, rightX, ry, colW, c4h);
+    sectionTitle(doc, `${num++} · Rad javobi (otkaz) tarixi`, rightX + pad, ry + 11);
+    pill(doc, rej.state === 'yes' ? 'BOR' : 'YO‘Q', rightX + pad, ry + head + 2, rej.state === 'yes' ? 'red' : 'green');
+    doc.font('R').fontSize(8.6).fillColor(C.text).text(rej.text, rightX + pad, ry + head + 25, { width: innerW, lineGap: 1.5 });
+    ry += c4h + L.gap;
+  } else {
+    ry -= L.gap;
+  }
+  y = Math.max(leftBottom, ry) + L.gap + 4;
 
   // ---- E-viza eslatmasi
   if (r.eviza) {
@@ -747,41 +883,8 @@ function draw(doc, r, photo, L = LEVELS[0]) {
     doc.roundedRect(M, y, W, eh, 7).fill(C.blueSoft);
     pill(doc, 'E-VIZA', M + 8, y + 4.5, 'blue');
     doc.font('M').fontSize(8).fillColor(C.navy).text(r.eviza, M + 66, y + 9, { width: W - 76, lineBreak: false });
-    y += eh + L.uniGap;
+    y += eh + L.gap;
   }
-  y += 3;
-
-  // ---- 6 · Jarayon qayerda
-  sectionTitle(doc, '6 · Jarayon qayerda', M, y);
-  y += 15;
-  const segGap = 6;
-  const segW = (W - segGap * 4) / 5;
-  const curColor = { green: C.green, yellow: C.yellow, navy: C.blue, blue: C.blue, red: C.red, gray: C.gray }[r.progressTheme] || C.blue;
-  r.progress.forEach((p, i) => {
-    const sx = M + i * (segW + segGap);
-    const color = p.state === 'done' ? C.navy : p.state === 'current' ? curColor : p.state === 'failed' ? C.red : C.track;
-    doc.roundedRect(sx, y, segW, 5, 2.5).fill(color);
-    const lx = sx;
-    const ly2 = y + 10;
-    const txtColor = p.state === 'todo' ? '#8E8A7E' : p.state === 'current' ? (curColor === C.yellow ? C.yellowDark : curColor) : p.state === 'failed' ? C.red : C.navy;
-    let off = 0;
-    if (p.state === 'done') {
-      doc.save().lineWidth(1.3).strokeColor(C.navy)
-        .moveTo(lx + 0.5, ly2 + 4.5).lineTo(lx + 3, ly2 + 7).lineTo(lx + 7.5, ly2 + 1.5).stroke().restore();
-      off = 11;
-    } else if (p.state === 'current') {
-      doc.circle(lx + 3.5, ly2 + 4.3, 3.2).fill(txtColor);
-      off = 10;
-    } else if (p.state === 'failed') {
-      doc.save().lineWidth(1.3).strokeColor(C.red)
-        .moveTo(lx + 1, ly2 + 1.5).lineTo(lx + 6.5, ly2 + 7).moveTo(lx + 6.5, ly2 + 1.5).lineTo(lx + 1, ly2 + 7).stroke().restore();
-      off = 10;
-    }
-    const f = p.state === 'todo' ? 'M' : 'SB';
-    const lsz = fitText(doc, p.label, f, 8.3, segW - off - 2, 6);
-    doc.font(f).fontSize(lsz).fillColor(txtColor).text(p.label, lx + off, ly2 + (8.3 - lsz) / 2, { lineBreak: false });
-  });
-  y += 28;
 
   // ---- Yetishmayotgan hujjatlar (bo'lsa)
   if (r.missing.length) {
@@ -803,25 +906,28 @@ function draw(doc, r, photo, L = LEVELS[0]) {
       const isz = fitText(doc, t, 'M', 8.2, cw - 14, 6);
       doc.font('M').fontSize(isz).fillColor(C.text).text(t, cx + 9, cy, { lineBreak: false });
     });
-    doc.font('R').fontSize(7.6).fillColor(C.label)
-      .text('Botdagi «Hujjatlarim» tugmasi orqali yuboring.', M + 14, y + mh - 15, { lineBreak: false });
+    doc.font('R').fontSize(7.6).fillColor(C.label).text('Botdagi «Hujjatlarim» tugmasi orqali yuboring.', M + 14, y + mh - 15, { lineBreak: false });
     y += mh + L.gap;
   }
 
-  // ---- XULOSA
+  // ---- XULOSA (eng oxirida)
+  const sumW = r.banner.celebrate ? W - 150 : W - 32;
   doc.font('SB').fontSize(L.sumSize);
-  const sumH = doc.heightOfString(r.summary, { width: W - 32, lineGap: 2 });
+  const sumH = doc.heightOfString(r.summary, { width: sumW, lineGap: 2 });
   const xh = 28 + sumH + 12;
-  const footerY = FOOTER_Y;
-  const xy = y;
-  doc.roundedRect(M, xy, W, xh, 10).fill(C.navy);
-  doc.font('XB').fontSize(8).fillColor('#8FA6F5').text('XULOSA', M + 16, xy + 12, { characterSpacing: 1, lineBreak: false });
-  doc.font('SB').fontSize(L.sumSize).fillColor(C.white).text(r.summary, M + 16, xy + 26, { width: W - 32, lineGap: 2 });
+  doc.roundedRect(M, y, W, xh, 10).fill(r.banner.celebrate ? C.green : C.navy);
+  if (r.banner.celebrate) {
+    doc.save().roundedRect(M, y, W, xh, 10).clip();
+    confetti(doc, M + W - 120, y + 4, 110, xh - 8);
+    doc.restore();
+  }
+  doc.font('XB').fontSize(8).fillColor(r.banner.celebrate ? '#D7F0E3' : '#8FA6F5').text('XULOSA', M + 16, y + 12, { characterSpacing: 1, lineBreak: false });
+  doc.font('SB').fontSize(L.sumSize).fillColor(C.white).text(r.summary, M + 16, y + 26, { width: sumW, lineGap: 2 });
 
   // ---- Footer
-  doc.font('M').fontSize(8).fillColor(C.navy).text(`Call Center: ${CALL_CENTER}`, M, footerY, { lineBreak: false });
-  doc.font('M').fontSize(8).fillColor(C.navy).text(`Telegram / Instagram: ${SOCIAL}`, M, footerY, { width: W, align: 'right', lineBreak: false });
-  return xy + xh;
+  doc.font('M').fontSize(8).fillColor(C.navy).text(`Call Center: ${CALL_CENTER}`, M, FOOTER_Y, { lineBreak: false });
+  doc.font('M').fontSize(8).fillColor(C.navy).text(`Telegram / Instagram: ${SOCIAL}`, M, FOOTER_Y, { width: W, align: 'right', lineBreak: false });
+  return y + xh;
 }
 
 // ---------------------------------------------------------------------
@@ -847,13 +953,14 @@ async function downloadTelegramFile(token, fileId) {
   return httpsGetBuffer(`https://api.telegram.org/file/bot${token}/${j.result.file_path}`);
 }
 
-function sendPdfToTelegram(token, chatId, pdfBuffer, fileName, caption) {
+function sendPdfToTelegram(token, chatId, pdfBuffer, fileName, caption, threadId) {
   return new Promise((resolve) => {
     const boundary = `----bf${crypto.randomBytes(8).toString('hex')}`;
     const field = (name, value) => Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`, 'utf8');
     const body = Buffer.concat([
       field('chat_id', String(chatId)),
       field('caption', caption || ''),
+      ...(threadId ? [field('message_thread_id', String(threadId))] : []),
       Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: application/pdf\r\n\r\n`, 'utf8'),
       pdfBuffer,
       Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'),
@@ -1133,10 +1240,11 @@ function createProfileService(deps) {
     return { ok: true };
   }
 
-  return { runTick, buildForContract, sendNow, sendPdfToTelegram: (chatId, pdf, name, cap) => sendPdfToTelegram(deps.botToken, chatId, pdf, name, cap) };
+  return { runTick, buildForContract, sendNow, sendPdfToTelegram: (chatId, pdf, name, cap, threadId) => sendPdfToTelegram(deps.botToken, chatId, pdf, name, cap, threadId) };
 }
 
 module.exports = {
+  normalizeStatus,
   sendPdfToTelegram, downloadTelegramFile,
   buildReportData, renderReportPdf, reportHash, findDbColumns, createProfileService,
   STATUS_RULES, PERIOD_DAYS, PROFILE_LOG_SHEET,
