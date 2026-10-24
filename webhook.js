@@ -332,11 +332,27 @@ async function logDocument(contractId, docCode, fileType, fileId) {
 const ADMIN_NOTIFY_CHAT_ID = process.env.ADMIN_NOTIFY_CHAT_ID; // /adminid orqali olinadi
 const BOSS_CHAT_ID = process.env.BOSS_CHAT_ID; // hisobot ko'ra oladigan rahbar
 
+// Loyiha egalari — barcha admin va rahbariyat buyruqlariga to'liq ruxsat.
+// Coolify env: OWNER_CHAT_IDS=123456789 (bir nechta bo'lsa vergul bilan)
+const OWNER_CHAT_IDS = String(process.env.OWNER_CHAT_IDS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+function isOwner(chatId) {
+  return OWNER_CHAT_IDS.includes(String(chatId));
+}
 function isAdmin(chatId) {
-  return ADMIN_NOTIFY_CHAT_ID && String(chatId) === String(ADMIN_NOTIFY_CHAT_ID);
+  return isOwner(chatId) || (!!ADMIN_NOTIFY_CHAT_ID && String(chatId) === String(ADMIN_NOTIFY_CHAT_ID));
 }
 function isBoss(chatId) {
-  return BOSS_CHAT_ID && String(chatId) === String(BOSS_CHAT_ID);
+  return isOwner(chatId) || (!!BOSS_CHAT_ID && String(chatId) === String(BOSS_CHAT_ID));
+}
+
+/** Ruxsat yo'q xabari — foydalanuvchiga o'z ID'sini ham ko'rsatadi (sozlash oson bo'lsin). */
+function denyText(userId, anonymous) {
+  if (anonymous) return 'Bu buyruq faqat hodimlar uchun.';
+  return 'Bu buyruq faqat hodimlar uchun.\n\n'
+    + `Sizning Telegram ID: ${userId}\n`
+    + 'Ruxsat berish uchun bu ID Coolify\'da OWNER_CHAT_IDS (loyiha egasi), SUPERVISOR_CHAT_IDS yoki STAFF_CHAT_IDS ga qo\'shiladi.';
 }
 
 // E'tiroz va shikoyatlar yuboriladigan guruh/topic.
@@ -432,7 +448,7 @@ function isZipFile(document) {
 /** Xabar matni/caption ichidan shartnoma ID'ga o'xshash matnni topadi. */
 function extractContractIdGuess(text) {
   if (!text) return null;
-  const m = String(text).trim().match(/[A-Za-z0-9]{2,6}-[A-Za-z0-9]{2,8}/);
+  const m = String(text).trim().match(/\b(?=[A-Za-z0-9-]*\d)[A-Za-z0-9]{2,12}(?:-[A-Za-z0-9]{1,12})?\b/);
   return m ? m[0].toUpperCase() : null;
 }
 
@@ -803,7 +819,10 @@ async function getDbColumnMap() {
   return dbHeaderCache;
 }
 
-const CONTRACT_ID_RE = /^[A-Za-z0-9]{2,6}-[A-Za-z0-9]{2,8}$/;
+// Shartnoma raqami: N021, L272, J385, 2703-B0106 ... Katta-kichik harf farqi
+// yo'q. Kamida bitta raqam bo'lishi shart — shunda "Sharipov" kabi familiya
+// ID deb adashtirilmaydi.
+const CONTRACT_ID_RE = /^(?=[A-Za-z0-9-]*\d)[A-Za-z0-9]{2,12}(?:-[A-Za-z0-9]{1,12})?$/;
 
 /** Talabaning to'liq profilini yig'adi. @returns {{msgs: string[]}|{error: string}} */
 async function buildStaffProfile(contractId, viewerId) {
@@ -890,20 +909,20 @@ async function searchStudents(query) {
 }
 
 /**
- * /profil so'rovini bajaradi. arg: "2603-K0001" (oldindan ko'rish — PDF
- * so'ragan hodimga/guruhga) yoki "2603-K0001 yubor" (talabaning o'ziga).
+ * /profil so'rovini bajaradi. arg: "N021" (oldindan ko'rish — PDF
+ * so'ragan hodimga/guruhga) yoki "N021 yubor" (talabaning o'ziga).
  */
-async function runProfilCommand(chatId, arg, threadId, viewerId) {
+async function runProfilCommand(chatId, arg, threadId, viewerId, trusted = false) {
   const parts = String(arg || '').trim().split(/\s+/);
   const pid = (parts[0] || '').toUpperCase();
   const sendToStudent = /^(yubor|send)$/i.test(parts[1] || '');
   if (!CONTRACT_ID_RE.test(pid)) {
-    await sendMessage(chatId, `"${parts[0] || ''}" — shartnoma raqami formatiga mos emas. Masalan: 2603-K0001`, null, threadId);
+    await sendMessage(chatId, `"${parts[0] || ''}" — shartnoma raqami formatiga mos emas. Masalan: N021`, null, threadId);
     return;
   }
   try {
     if (sendToStudent) {
-      if (!(isAdmin(viewerId) || isBoss(viewerId) || isSupervisor(viewerId))) {
+      if (!trusted && !(isAdmin(viewerId) || isBoss(viewerId) || isSupervisor(viewerId))) {
         await sendMessage(chatId, 'Talabaga yuborish faqat supervisor va rahbariyat uchun.', null, threadId);
         return;
       }
@@ -2254,10 +2273,10 @@ async function processUpdate(body) {
     // profili (DB asosida, oddiy matn) ---
     {
       const mTalaba = text.match(/^\/(talaba|info)(?:@\w+)?(?:\s+([\s\S]+))?$/i);
-      const mDirect = text.match(/^\/([A-Za-z0-9]{2,6}-[A-Za-z0-9]{2,8})(?:@\w+)?(?:\s+profile)?$/i);
+      const mDirect = text.match(/^\/((?=[A-Za-z0-9-]*\d)[A-Za-z0-9]{2,12}(?:-[A-Za-z0-9]{1,12})?)(?:@\w+)?(?:\s+profile)?$/i);
       if (mTalaba || mDirect) {
         if (!canViewStudent(chatId)) {
-          await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.');
+          await sendMessage(chatId, denyText(chatId));
           return;
         }
         const query = mDirect ? mDirect[1] : (mTalaba[2] || '').trim();
@@ -2275,13 +2294,13 @@ async function processUpdate(body) {
     // oldindan ko'rish (hodimning o'ziga) yoki talabaga darhol yuborish ---
     if (/^\/profil(@\w+)?(\s|$)/i.test(text)) {
       if (!canViewStudent(chatId)) {
-        await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.');
+        await sendMessage(chatId, denyText(chatId));
         return;
       }
       const arg = text.replace(/^\/profil(@\w+)?/i, '').trim();
       if (!arg) {
         userStates.set(chatId, { ...(userStates.get(chatId) || {}), mode: 'awaiting_profil_id' });
-        await sendMessage(chatId, 'Qaysi talabaning PDF hisoboti kerak? Shartnoma raqamini yozing:\n\n(Talabaning o\'ziga yuborish uchun: 2603-K0001 yubor)');
+        await sendMessage(chatId, 'Qaysi talabaning PDF hisoboti kerak? Shartnoma raqamini yozing:\n\n(Talabaning o\'ziga yuborish uchun: N021 yubor)');
         return;
       }
       await runProfilCommand(chatId, arg, null, chatId);
@@ -2907,7 +2926,7 @@ async function processUpdate(body) {
         'Kimlarga yuborilsin?\n\n'
         + 'Barchaga yuborish uchun "ALL" deb yozing.\n'
         + 'Muayyan talabalarga yuborish uchun shartnoma ID\'larini vergul bilan ajratib yozing.\n\n'
-        + 'Misol: 2609-M0001, 2609-M0002');
+        + 'Misol: N021, L272');
       return;
     }
 
@@ -3411,6 +3430,12 @@ async function handleGroupMessage(message) {
   const threadId = message.message_thread_id;
   const userId = message.from ? message.from.id : null;
   const username = message.from ? (message.from.username || '') : '';
+  // Guruh egasi/admini "anonim" yozsa, Telegram haqiqiy ID o'rniga guruhning
+  // o'zini (sender_chat) yuboradi. Anonim yozish faqat guruh adminlariga
+  // ruxsat etilgani uchun bunday xabar egasi hodim deb hisoblanadi.
+  const isAnonAdmin = !!(message.sender_chat && String(message.sender_chat.id) === String(chatId));
+  const staffSender = isAnonAdmin || canViewStudent(userId);
+  const fullStaffSender = isAnonAdmin || !!(userId && (isAdmin(userId) || isBoss(userId) || isSupervisor(userId)));
 
   // Diagnostika: guruhdan kelgan har bir buyruq logga yoziladi. Agar
   // buyruq yozilgan-u, bu qator logda bo'lmasa — Telegram xabarni botga
@@ -3475,10 +3500,10 @@ async function handleGroupMessage(message) {
   {
     const cmd = rawText.replace(/^(\/[\w-]+)@\w+/, '$1');
     const mTalaba = cmd.match(/^\/(talaba|info)(?:\s+([\s\S]+))?$/i);
-    const mDirect = cmd.match(/^\/([A-Za-z0-9]{2,6}-[A-Za-z0-9]{2,8})(?:\s+profile)?$/i);
+    const mDirect = cmd.match(/^\/((?=[A-Za-z0-9-]*\d)[A-Za-z0-9]{2,12}(?:-[A-Za-z0-9]{1,12})?)(?:\s+profile)?$/i);
     if (mTalaba || mDirect) {
-      if (!canViewStudent(userId)) {
-        await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.', null, threadId);
+      if (!staffSender) {
+        await sendMessage(chatId, denyText(userId, isAnonAdmin), null, threadId);
         return;
       }
       const query = mDirect ? mDirect[1] : (mTalaba[2] || '').trim();
@@ -3499,8 +3524,8 @@ async function handleGroupMessage(message) {
   {
     const cmd = rawText.replace(/^(\/[\w-]+)@\w+/, '$1');
     if (/^\/profil(\s|$)/i.test(cmd)) {
-      if (!canViewStudent(userId)) {
-        await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.', null, threadId);
+      if (!staffSender) {
+        await sendMessage(chatId, denyText(userId, isAnonAdmin), null, threadId);
         return;
       }
       const arg = cmd.replace(/^\/profil/i, '').trim();
@@ -3511,7 +3536,7 @@ async function handleGroupMessage(message) {
         }
         return;
       }
-      await runProfilCommand(chatId, arg, threadId, userId);
+      await runProfilCommand(chatId, arg, threadId, userId, fullStaffSender);
       return;
     }
   }
@@ -3519,9 +3544,8 @@ async function handleGroupMessage(message) {
   // --- /arxiv: talabaning to'liq ZIP hujjatlar arxivini olib berish ---
   // (faqat hodimlar — bu nozik, to'liq hujjatlar to'plami)
   if (text === '/arxiv') {
-    const senderIsStaffForArxiv = userId && (isAdmin(userId) || isBoss(userId) || isSupervisor(userId));
-    if (!senderIsStaffForArxiv) {
-      await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.', null, threadId);
+    if (!fullStaffSender) {
+      await sendMessage(chatId, denyText(userId, isAnonAdmin), null, threadId);
       return;
     }
     const result = await sendMessage(chatId, 'Qaysi talabaning to\'liq ZIP arxivi kerak? Shartnoma raqamini SHU XABARGA REPLY qilib yozing.', null, threadId);
@@ -3539,17 +3563,17 @@ async function handleGroupMessage(message) {
     const contractId = text.trim().toUpperCase();
 
     if (type === 'profil') {
-      if (!canViewStudent(userId)) {
-        await sendMessage(reqChatId, 'Bu buyruq faqat hodimlar uchun.', null, reqThreadId);
+      if (!staffSender) {
+        await sendMessage(reqChatId, denyText(userId, isAnonAdmin), null, reqThreadId);
         return;
       }
-      await runProfilCommand(reqChatId, rawText, reqThreadId, userId);
+      await runProfilCommand(reqChatId, rawText, reqThreadId, userId, fullStaffSender);
       return;
     }
 
     if (type === 'talaba') {
-      if (!canViewStudent(userId)) {
-        await sendMessage(reqChatId, 'Bu buyruq faqat hodimlar uchun.', null, reqThreadId);
+      if (!staffSender) {
+        await sendMessage(reqChatId, denyText(userId, isAnonAdmin), null, reqThreadId);
         return;
       }
       await handleStudentLookup(reqChatId, rawText, reqThreadId, userId);
@@ -3620,12 +3644,12 @@ async function handleGroupMessage(message) {
   // xabar YUBORUVCHIning shaxsiy ID'si (message.from.id) bo'yicha
   // tekshiriladi. Avval bu qilinmagani sabab guruhda hech bir
   // buyruq ishlamas edi.
-  const senderIsStaff = userId && (isAdmin(userId) || isBoss(userId) || isSupervisor(userId));
+  const senderIsStaff = fullStaffSender;
 
   const STAFF_COMMANDS = ['/hisobot', '/xulosa', '/qaytar', '/viza', '/namuna', '/elon'];
   if (STAFF_COMMANDS.includes(text)) {
     if (!senderIsStaff) {
-      await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.', null, threadId);
+      await sendMessage(chatId, denyText(userId, isAnonAdmin), null, threadId);
       return;
     }
 
