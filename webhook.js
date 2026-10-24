@@ -27,6 +27,9 @@ const {
   buildParentIncomeSubmenu, buildMoreFilesKeyboard, NON_BLOCKING_CODES,
   DOCUMENT_GROUP_CHAT_ID, DOCUMENT_TOPIC_ID,
 } = require('./documentCollection');
+const { createProfileService } = require('./profileReport');
+const { resolveDbColumns, mergeStudent, DB_LAST_COL } = require('./studentData');
+const { formatStaffProfile } = require('./staffProfile');
 
 const app = express();
 app.use(express.json());
@@ -349,6 +352,17 @@ const SUPERVISOR_CHAT_IDS = String(process.env.SUPERVISOR_CHAT_IDS || '')
 function isSupervisor(chatId) {
   return SUPERVISOR_CHAT_IDS.includes(String(chatId));
 }
+// Faqat ma'lumot KO'RISH huquqiga ega boshqa hodimlar (menejer, call-markaz
+// va h.k.). Coolify env: STAFF_CHAT_IDS=111,222
+const STAFF_CHAT_IDS = String(process.env.STAFF_CHAT_IDS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+/** Talaba profilini ko'rish huquqi: admin, boss, supervisor yoki STAFF_CHAT_IDS */
+function canViewStudent(userId) {
+  if (!userId) return false;
+  return isAdmin(userId) || isBoss(userId) || isSupervisor(userId) || STAFF_CHAT_IDS.includes(String(userId));
+}
+
 /** FAQ tahrirlash huquqi: supervisor, admin yoki boss */
 function canEditFaq(chatId) {
   return isSupervisor(chatId) || isAdmin(chatId) || isBoss(chatId);
@@ -774,6 +788,140 @@ async function getDbIdIndex() {
   return index;
 }
 
+// =====================================================================
+// HODIMLAR UCHUN TALABA PROFILI (/talaba ID) — DB asosiy manba, bo'sh
+// kataklar DRAFT'dan to'ldiriladi va 🔺 bilan belgilanadi.
+// =====================================================================
+let dbHeaderCache = null;
+let dbHeaderCacheAt = 0;
+async function getDbColumnMap() {
+  if (!dbHeaderCache || Date.now() - dbHeaderCacheAt > 10 * 60 * 1000) {
+    const h = await readSheetRange(`${DB_SHEET}!A1:${DB_LAST_COL}1`);
+    dbHeaderCache = resolveDbColumns((h && h[0]) || []);
+    dbHeaderCacheAt = Date.now();
+  }
+  return dbHeaderCache;
+}
+
+const CONTRACT_ID_RE = /^[A-Za-z0-9]{2,6}-[A-Za-z0-9]{2,8}$/;
+
+/** Talabaning to'liq profilini yig'adi. @returns {{msgs: string[]}|{error: string}} */
+async function buildStaffProfile(contractId, viewerId) {
+  const id = String(contractId || '').trim().toUpperCase();
+  const cols = await getDbColumnMap();
+  const index = await getDbIdIndex();
+  let dbRowNum = index[id];
+  if (!dbRowNum) { dbIdIndexCache = null; dbRowNum = (await getDbIdIndex())[id]; }
+  let dbRow = null;
+  if (dbRowNum) {
+    const res = await readSheetRange(`${DB_SHEET}!A${dbRowNum}:${DB_LAST_COL}${dbRowNum}`);
+    dbRow = (res && res[0]) || null;
+  }
+  const draftRowNum = await findRowByContractId(id);
+  const draft = draftRowNum ? await getRowData(draftRowNum) : null;
+  if (!dbRow && !draft) return { error: `"${id}" — DB va DRAFT sahifalarida topilmadi.` };
+
+  const { values, fromDraft } = mergeStudent(dbRow, cols.idx, draft);
+  if (!values.id) values.id = id;
+
+  // Yetishmayotgan hujjatlar: kodlar bo'lsa nomiga aylantiramiz
+  let missingDocLabels = null;
+  if (values.missingDocs) {
+    const tokens = fromDraft.has('missingDocs')
+      ? getMissingDocs(values.missingDocs, draft && draft.AJ, draft && draft.AM)
+      : values.missingDocs.split(/[,;\n]+/).map((t) => t.trim()).filter(Boolean);
+    missingDocLabels = tokens.map((t) => {
+      const d = DOCUMENT_TYPES.find((x) => x.code === String(t).toUpperCase());
+      return d ? d.label : t;
+    });
+  }
+
+  let supervisorPhone = '';
+  if (values.supervisor) {
+    try {
+      const contacts = await getContacts();
+      const sv = values.supervisor.toLowerCase();
+      const c = contacts.find((x) => x.name.toLowerCase() === sv)
+        || contacts.find((x) => x.name.toLowerCase().includes(sv) || sv.includes(x.name.toLowerCase()));
+      if (c) supervisorPhone = c.phone;
+    } catch (e) { /* kontaktsiz ham davom etamiz */ }
+  }
+
+  let docsCount = 0;
+  try { docsCount = (await getDocumentsForContract(id)).filter((d) => d.fileId && d.fileId !== '-').length; } catch (e) { /* jim */ }
+
+  const columnWarnings = [];
+  if (isAdmin(viewerId) || isBoss(viewerId)) {
+    if (cols.moved.length) columnWarnings.push(`DB ustunlari surilgan (avtomatik topildi): ${cols.moved.join(', ')}`);
+    if (cols.missing.length) columnWarnings.push(`DB'da topilmagan sarlavhalar: ${cols.missing.join(', ')}`);
+  }
+
+  const msgs = formatStaffProfile({
+    values, fromDraft, today: new Date(), supervisorPhone, docsCount,
+    missingDocLabels, inDb: !!dbRow, columnWarnings,
+  });
+  return { msgs };
+}
+
+/** Ism yoki ID bo'yicha qidiruv (DB). @returns {Array<{id, name}>} */
+async function searchStudents(query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (q.length < 2) return [];
+  const cols = await getDbColumnMap();
+  const idCol = cols.idx.id;
+  const nameCol = cols.idx.fullName;
+  const toL = (i) => { let s = ''; let n = i + 1; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; };
+  const from = toL(Math.min(idCol, nameCol));
+  const to = toL(Math.max(idCol, nameCol));
+  const rows = await readSheetRange(`${DB_SHEET}!${from}2:${to}3000`) || [];
+  const off = Math.min(idCol, nameCol);
+  const words = q.split(/\s+/).filter(Boolean);
+  const out = [];
+  for (const r of rows) {
+    if (!r) continue;
+    const id = String(r[idCol - off] || '').trim();
+    const name = String(r[nameCol - off] || '').trim();
+    if (!id) continue;
+    const hay = `${id} ${name}`.toLowerCase();
+    if (words.every((w) => hay.includes(w))) out.push({ id: id.toUpperCase(), name });
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+/** /talaba so'rovini bajaradi: ID bo'lsa profil, aks holda qidiruv natijasi. */
+async function handleStudentLookup(chatId, query, threadId, viewerId) {
+  const q = String(query || '').trim();
+  try {
+    if (CONTRACT_ID_RE.test(q)) {
+      const r = await buildStaffProfile(q, viewerId);
+      if (!r.error) {
+        for (const m of r.msgs) await sendMessage(chatId, m, null, threadId, 'HTML');
+        return;
+      }
+    }
+    const found = await searchStudents(q);
+    if (found.length === 0) {
+      await sendMessage(chatId, `"${q}" bo'yicha talaba topilmadi. Shartnoma ID yoki familiyani tekshiring.`, null, threadId);
+      return;
+    }
+    if (found.length === 1) {
+      const r = await buildStaffProfile(found[0].id, viewerId);
+      if (r.error) { await sendMessage(chatId, r.error, null, threadId); return; }
+      for (const m of r.msgs) await sendMessage(chatId, m, null, threadId, 'HTML');
+      return;
+    }
+    const shown = found.slice(0, 10);
+    const kb = { inline_keyboard: shown.map((f) => [{ text: `${f.id} — ${f.name}`.slice(0, 60), callback_data: `tinfo:${f.id}` }]) };
+    await sendMessage(chatId,
+      `"${q}" bo'yicha ${found.length}${found.length >= 30 ? '+' : ''} ta talaba topildi${found.length > 10 ? ' (birinchi 10 tasi)' : ''}. Tanlang:`,
+      kb, threadId);
+  } catch (e) {
+    console.error('Talaba profili xatosi:', e);
+    await sendMessage(chatId, 'Ma\'lumotni olishda xatolik: ' + e.message, null, threadId);
+  }
+}
+
 async function findDbRowByContractId(contractId) {
   const normalized = String(contractId).trim().toUpperCase();
   const index = await getDbIdIndex();
@@ -1049,6 +1197,8 @@ const ADMIN_COMMANDS = [
   { command: 'savolnamuna', description: 'Forma savoliga namuna rasm biriktirish' },
   { command: 'savolnamuna_royxat', description: 'Namunali savollarni korish/ozgartirish' },
   { command: 'arxiv', description: 'Talabaning toliq ZIP hujjatlar arxivini olish' },
+  { command: 'profil', description: 'Talabaning PDF hisobotini korish: /profil ID' },
+  { command: 'talaba', description: 'Talaba haqida barcha malumot: /talaba ID yoki familiya' },
   { command: 'qollanma', description: 'Funksiyalar bo\'yicha yo\'riqnoma' },
   { command: 'menu', description: 'Tugmalarni qayta ko\'rsatish' },
 ];
@@ -1085,6 +1235,7 @@ async function registerDefaultCommands() {
   // haqiqatan ishlaydigan buyruqlar ko'rsatiladi.
   const GROUP_COMMANDS = [
     { command: 'hujjat', description: 'Talaba hujjatlarini so\'rash' },
+    { command: 'talaba', description: 'Talaba ma\'lumotlari (hodimlar uchun)' },
     { command: 'savollar', description: 'Ko\'p so\'raladigan savollar' },
     { command: 'filiallar', description: 'Filiallarimiz manzillari' },
     { command: 'aloqa', description: 'Hodimlar telefon raqamlari' },
@@ -1148,6 +1299,9 @@ Muayyan talabaning barcha yuborgan hujjatlarini qayta olish uchun. Shartnoma raq
 
 🛂 Viza bosqichi
 Talaba universitetga qabul qilinib, kontraktni to'lagandan keyin ishlatiladi. Bu tugma bosilgach, botdan talabadan KDB va ota-ona bank statement hujjatlari so'raladi. Bir nechta talabani vergul bilan ajratib kiritish mumkin.
+
+🔎 /talaba ID yoki /talaba Familiya
+Talaba haqidagi barcha ma'lumot (DB asosida). Guruhda ham ishlaydi. 🔺 belgisi — ma'lumot DB'da yo'q, DRAFT'dan olingan.
 
 📊 To'liq hisobot
 Barcha talabalar bo'yicha analitika: bosqichlar, sertifikat turlari va ballari, filiallar, universitetlar, to'lov holati.
@@ -2037,6 +2191,65 @@ async function processUpdate(body) {
       return;
     }
 
+    // --- /talaba ID | /talaba Familiya | /ID — hodimlar uchun talaba
+    // profili (DB asosida, oddiy matn) ---
+    {
+      const mTalaba = text.match(/^\/(talaba|info)(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+      const mDirect = text.match(/^\/([A-Za-z0-9]{2,6}-[A-Za-z0-9]{2,8})(?:@\w+)?(?:\s+profile)?$/i);
+      if (mTalaba || mDirect) {
+        if (!canViewStudent(chatId)) {
+          await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.');
+          return;
+        }
+        const query = mDirect ? mDirect[1] : (mTalaba[2] || '').trim();
+        if (!query) {
+          userStates.set(chatId, { ...(userStates.get(chatId) || {}), mode: 'awaiting_talaba_query' });
+          await sendMessage(chatId, 'Talabaning shartnoma ID sini yoki familiyasini yozing:');
+          return;
+        }
+        await handleStudentLookup(chatId, query, null, chatId);
+        return;
+      }
+    }
+
+    // --- /profil ID [yubor]: talabaning shaxsiy PDF hisobotini
+    // oldindan ko'rish (hodimning o'ziga) yoki talabaga darhol yuborish ---
+    if (text === '/profil' || text.startsWith('/profil ')) {
+      if (!isAdmin(chatId) && !isBoss(chatId) && !isSupervisor(chatId)) {
+        await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.');
+        return;
+      }
+      const parts = text.split(/\s+/).slice(1);
+      const pid = (parts[0] || '').toUpperCase();
+      const sendToStudent = /^(yubor|send)$/i.test(parts[1] || '');
+      if (!pid) {
+        await sendMessage(chatId,
+          'Foydalanish:\n/profil 2603-K0001 — PDF hisobotni o\'zingizga ko\'rish\n'
+          + '/profil 2603-K0001 yubor — talabaning o\'ziga darhol yuborish\n\n'
+          + `Avtomatik yuborish: ${PROFILE_AUTO_SEND ? 'YOQILGAN ✅' : 'O\'CHIRILGAN (PROFILE_AUTO_SEND=1 qo\'ying)'}`);
+        return;
+      }
+      await sendMessage(chatId, 'PDF tayyorlanmoqda...');
+      try {
+        if (sendToStudent) {
+          const r = await profileService.sendNow(pid);
+          await sendMessage(chatId, r.ok ? `✅ ${pid} — hisobot talabaga yuborildi.` : `❌ ${pid}: ${r.error}`);
+        } else {
+          const r = await profileService.buildForContract(pid);
+          if (r.error) {
+            await sendMessage(chatId, `❌ ${r.error}`);
+          } else {
+            await profileService.sendPdfToTelegram(chatId, r.pdf, `Hisobot_${pid}.pdf`, `👁 Oldindan ko'rish (talabaga yuborilmadi)\n${pid}`);
+            if (r.notes.length) await sendMessage(chatId, 'ℹ️ ' + r.notes.join('\n• '));
+          }
+        }
+      } catch (e) {
+        console.error('/profil xatosi:', e);
+        await sendMessage(chatId, 'Xatolik: ' + e.message);
+      }
+      return;
+    }
+
     // --- /hisobot: Boss uchun to'liq analitika (DB sahifasidan) ---
     if (text === '/hisobot') {
       if (!isBoss(chatId) && !isAdmin(chatId)) {
@@ -2462,6 +2675,13 @@ async function processUpdate(body) {
 
     // --- Yordam matni kutilmoqda ---
     const session = userStates.get(chatId);
+    // --- /talaba: ID yoki familiya kutilmoqda ---
+    if (session && session.mode === 'awaiting_talaba_query' && text) {
+      userStates.set(chatId, { ...session, mode: null });
+      await handleStudentLookup(chatId, text, null, chatId);
+      return;
+    }
+
     // --- ZIP arxiv uchun shartnoma ID kutilmoqda ---
     if (session && session.mode === 'awaiting_zip_contract_id' && session.pendingZip) {
       const { fileId, fileName, uploaderLabel } = session.pendingZip;
@@ -3200,6 +3420,30 @@ async function handleGroupMessage(message) {
     return;
   }
 
+  // --- /talaba ID | /talaba Familiya | /ID — guruhda ham ishlaydi,
+  // faqat hodimlar (ruxsat yuboruvchining shaxsiy ID'si bo'yicha) ---
+  {
+    const cmd = rawText.replace(/^(\/[\w-]+)@\w+/, '$1');
+    const mTalaba = cmd.match(/^\/(talaba|info)(?:\s+([\s\S]+))?$/i);
+    const mDirect = cmd.match(/^\/([A-Za-z0-9]{2,6}-[A-Za-z0-9]{2,8})(?:\s+profile)?$/i);
+    if (mTalaba || mDirect) {
+      if (!canViewStudent(userId)) {
+        await sendMessage(chatId, 'Bu buyruq faqat hodimlar uchun.', null, threadId);
+        return;
+      }
+      const query = mDirect ? mDirect[1] : (mTalaba[2] || '').trim();
+      if (!query) {
+        const result = await sendMessage(chatId, 'Qaysi talaba? Shartnoma ID yoki familiyani SHU XABARGA REPLY qilib yozing.', null, threadId);
+        if (result && result.result && result.result.message_id) {
+          pendingGroupRequests.set(result.result.message_id, { chatId, threadId, type: 'talaba' });
+        }
+        return;
+      }
+      await handleStudentLookup(chatId, query, threadId, userId);
+      return;
+    }
+  }
+
   // --- /arxiv: talabaning to'liq ZIP hujjatlar arxivini olib berish ---
   // (faqat hodimlar — bu nozik, to'liq hujjatlar to'plami)
   if (text === '/arxiv') {
@@ -3221,6 +3465,15 @@ async function handleGroupMessage(message) {
     pendingGroupRequests.delete(message.reply_to_message.message_id);
 
     const contractId = text.trim().toUpperCase();
+
+    if (type === 'talaba') {
+      if (!canViewStudent(userId)) {
+        await sendMessage(reqChatId, 'Bu buyruq faqat hodimlar uchun.', null, reqThreadId);
+        return;
+      }
+      await handleStudentLookup(reqChatId, rawText, reqThreadId, userId);
+      return;
+    }
 
     if (type === 'arxiv') {
       const archive = await findZipArchiveRow(contractId);
@@ -3420,6 +3673,14 @@ async function handleCallbackInner(callback) {
       await sendMessage(chatId, 'Ma\'lumotlaringiz topilmadi. Iltimos, shartnoma raqamingizni qaytadan kiriting:');
       return;
     }
+  }
+
+  // --- Qidiruv natijasidan talaba tanlandi (hodimlar) ---
+  if (data.startsWith('tinfo:')) {
+    if (!canViewStudent(actorId)) { answerCallbackQuery(callbackId, 'Ruxsat yo\'q.'); return; }
+    answerCallbackQuery(callbackId, '');
+    await handleStudentLookup(chatId, data.substring(6), threadId, actorId);
+    return;
   }
 
   // --- FAQ: savol tanlandi ---
@@ -4539,6 +4800,37 @@ async function runPreConfirmReminderTick() {
   }
 }
 
+// =====================================================================
+// SHAXSIY PDF HISOBOT (profileReport.js) — har 10 kunda + status
+// o'zgarganda. Xavfsizlik uchun AVTOMATIK yuborish faqat Coolify'da
+// PROFILE_AUTO_SEND=1 qo'yilganda yoqiladi. Unga qadar /profil ID
+// buyrug'i bilan oldindan ko'rib, tekshirib olinadi.
+// =====================================================================
+const PROFILE_AUTO_SEND = process.env.PROFILE_AUTO_SEND === '1';
+
+/** Sahifa (tab) yo'q bo'lsa — yaratadi va sarlavha qatorini yozadi. */
+async function ensureSheet(title, headers) {
+  const client = await auth.getClient();
+  const sheets = google.sheets({ version: 'v4', auth: client });
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID, fields: 'sheets.properties.title' });
+  const exists = (meta.data.sheets || []).some((sh) => sh.properties && sh.properties.title === title);
+  if (exists) return;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    resource: { requests: [{ addSheet: { properties: { title } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID, range: `${title}!A1`, valueInputOption: 'RAW', resource: { values: [headers] },
+  });
+  console.log(`"${title}" sahifasi yaratildi.`);
+}
+
+const profileService = createProfileService({
+  readSheetRange, updateCell, appendRow, ensureSheet,
+  getMissingDocs, isComplete, DOCUMENT_TYPES, NON_BLOCKING_CODES,
+  botToken: BOT_TOKEN, autoSend: PROFILE_AUTO_SEND,
+});
+
 app.listen(PORT, () => {
   console.log(`Student bot ${PORT} portida ishga tushdi`);
   // Telegram "Menu" tugmasi uchun buyruqlar ro'yxatini ro'yxatdan
@@ -4550,4 +4842,6 @@ app.listen(PORT, () => {
   setInterval(runDailySummaryTick, 5 * 60 * 1000);
   setInterval(runBankStatementReminderTick, 5 * 60 * 1000);
   setInterval(runPreConfirmReminderTick, 5 * 60 * 1000);
+  setInterval(() => profileService.runTick(), 5 * 60 * 1000);
+  console.log(`Shaxsiy PDF hisobot: avtomatik yuborish ${PROFILE_AUTO_SEND ? 'YOQILGAN' : 'o\'chirilgan (/profil bilan sinash mumkin)'}`);
 });
