@@ -87,14 +87,17 @@ const STATUS_RULES = {
   'QABUL QILINDI': { title: 'TABRIKLAYMIZ! QABUL QILINDINGIZ', theme: 'green', icon: 'check', next: 'Kontrakt to‘lovi va viza', done: 4, uni: 'accepted', celebrate: true, highlight: 3 },
   'QABUL QILINMADI': { title: 'QABUL QILINMADI', theme: 'red', icon: 'cross', next: 'Yangi reja — supervisor bilan', done: 3, failed: 3, uni: 'none' },
   "KONTRAKT TO'LADI": { title: 'KONTRAKT TO‘LANDI', theme: 'green', icon: 'check', next: 'Viza hujjatlari (KDB)', done: 4, current: 4, currentLabel: 'Viza hujjatlari', uni: 'accepted' },
-  "KDB QO'YDI": { title: 'KDB HISOBI OCHILDI', theme: 'blue', icon: 'check', next: 'COA olish', done: 4, current: 4, currentLabel: 'Viza hujjatlari', uni: 'accepted' },
-  'COA OLDI': { title: 'COA OLINDI', theme: 'blue', icon: 'check', next: 'Elchixonaga topshirish', done: 4, current: 4, currentLabel: 'Viza hujjatlari', uni: 'accepted' },
-  'ELCHIXONA': { title: 'VIZAGA TOPSHIRILDI', theme: 'yellow', icon: 'clock', next: 'Viza natijasi', done: 4, current: 4, currentLabel: 'Viza kutilmoqda', uni: 'accepted' },
+  // Viza bosqichi tartibi (DB'dagi haqiqiy oqim): KONTRAKT TO'LADI -> KDB ->
+  // ELCHIXONA HUJJATLAR -> COA OLDI -> VISAGA TOPSHIRILDI -> VIZA TASDIQLANDI
+  'KDB': { title: 'KDB QO‘YILDI', theme: 'blue', icon: 'check', next: 'Elchixona hujjatlari', done: 4, current: 4, currentLabel: 'Viza hujjatlari', uni: 'accepted' },
+  'ELCHIXONA HUJJATLAR': { title: 'ELCHIXONA HUJJATLARI TAYYOR', theme: 'blue', icon: 'check', next: 'Taklifnoma (COA) olish', done: 4, current: 4, currentLabel: 'Viza hujjatlari', uni: 'accepted' },
+  'COA OLDI': { title: 'TAKLIFNOMA (COA) OLINDI', theme: 'blue', icon: 'check', next: 'Vizaga topshirish', done: 4, current: 4, currentLabel: 'Vizaga tayyor', uni: 'accepted' },
   'VISAGA TOPSHIRILDI': { title: 'VIZAGA TOPSHIRILDI', theme: 'yellow', icon: 'clock', next: 'Viza natijasi', done: 4, current: 4, currentLabel: 'Viza kutilmoqda', uni: 'accepted' },
   'VIZA TASDIQLANDI': { title: 'TABRIKLAYMIZ! VIZA TASDIQLANDI', theme: 'green', icon: 'check', next: 'Aviabilet va jo‘nash', done: 5, uni: 'accepted', celebrate: true, highlight: 4 },
   'VIZA RAD QILINDI': { title: 'VIZA RAD ETILDI', theme: 'red', icon: 'cross', next: 'Keyingi reja — supervisor bilan', done: 4, failed: 4, uni: 'accepted' },
   'SHARTNOMA BEKOR QILDI': { title: 'SHARTNOMA BEKOR QILINGAN', theme: 'gray', icon: 'cross', next: 'Savollar bo‘yicha filialga', done: 0, uni: 'none' },
   'MUZLATDI': { title: 'JARAYON TO‘XTATILGAN', theme: 'gray', icon: 'pause', next: 'Qayta boshlash — filialga', done: 1, uni: 'none' },
+  'HUJJATI YOQ': { title: 'HUJJATLAR HALI TOPSHIRILMAGAN', theme: 'red', icon: 'clock', next: 'Hujjatlarni bugunoq yuborish', done: 1, current: 1, currentLabel: 'Hujjat kutilmoqda' },
 };
 const DEFAULT_RULE = { title: 'MA’LUMOTLAR QABUL QILINDI', theme: 'navy', icon: 'doc', next: 'Supervisor bog‘lanadi', done: 1 };
 
@@ -299,9 +302,20 @@ function normalizeStatus(raw) {
   let m = t.match(/^QABUL QILINDI\s*-?\s*(\d)?$/);
   if (m) return { ...res, key: 'QABUL QILINDI', acceptedIdx: m[1] ? Math.max(0, Number(m[1]) - 1) : 0 };
   if (/QABUL QILINMADI/.test(t)) return { ...res, key: 'QABUL QILINMADI' };
-  m = t.match(/^UNIVERSITY\s*(\d)\s*TOPSHIRILDI/);
+  // "TOPSHIRILD" (oxirgi harfsiz) kabi xatoli yozuvlar ham qabul qilinadi
+  m = t.match(/^UNIVERSITY\s*(\d)\s*TOPSHIRIL/);
   if (m) return { ...res, key: Number(m[1]) >= 2 ? 'UNIVERSITY 2 TOPSHIRILDI' : 'UNIVERSITY 1 TOPSHIRILDI' };
-  if (/^VI[SZ]AGA TOPSHIRILDI/.test(t)) return { ...res, key: 'VISAGA TOPSHIRILDI' };
+  if (/^VI[SZ]AGA TOPSHIRIL/.test(t)) return { ...res, key: 'VISAGA TOPSHIRILDI' };
+  if (/^VI[SZ]A TASDIQ/.test(t)) return { ...res, key: 'VIZA TASDIQLANDI' };
+  if (/^VI[SZ]A RAD/.test(t)) return { ...res, key: 'VIZA RAD QILINDI' };
+  if (/^KDB/.test(t)) return { ...res, key: 'KDB' };
+  if (/^ELCHIXONA/.test(t)) return { ...res, key: 'ELCHIXONA HUJJATLAR' };
+  if (/^HUJJATI?\s*YO'?Q/.test(t)) return { ...res, key: 'HUJJATI YOQ' };
+  if (/^SHARTNOMA BEKOR/.test(t)) return { ...res, key: 'SHARTNOMA BEKOR QILDI' };
+  if (/^HUJJAT YIG'?IL/.test(t)) return { ...res, key: "HUJJAT YIG'ILMOQDA" };
+  if (/^HUJJAT TO'?LIQ/.test(t)) return { ...res, key: "HUJJAT TO'LIQ" };
+  if (/^KONTRAKT TO'?LA/.test(t)) return { ...res, key: "KONTRAKT TO'LADI" };
+  if (/^TO'?LOV QILDI/.test(t)) return { ...res, key: "TO'LOV QILDI" };
   return res;
 }
 
@@ -484,10 +498,13 @@ function buildSummary({ status, rule, universities, acceptedUni, program, cert, 
     case 'SHARTNOMA QILDI':
       return 'Hujjatlarni tayyorlash boshlang‘ich to‘lovdan keyin boshlanadi. Savollaringiz bo‘lsa, supervisoringizga murojaat qiling.';
     case "KONTRAKT TO'LADI":
-    case "KDB QO'YDI":
-    case 'COA OLDI':
+    case 'KDB':
+    case 'ELCHIXONA HUJJATLAR':
       return `Universitet bosqichi muvaffaqiyatli yakunlandi, hozir viza hujjatlari tayyorlanmoqda.${missSentence}`;
-    case 'ELCHIXONA':
+    case 'COA OLDI':
+      return 'Universitetdan taklifnoma xati (COA) olindi — bu viza uchun eng muhim hujjat. Keyingi qadam — hujjatlaringizni elchixonaga topshirish.';
+    case 'HUJJATI YOQ':
+      return `Siz hali hujjatlaringizni topshirmagansiz. Hujjatlar to‘liq bo‘lmaguncha ularni tayyorlash va universitetga topshirish boshlanmaydi, qabul muddatlari esa cheklangan.${missSentence || ' Hujjatlarni botdagi «Hujjatlarim» tugmasi orqali yuboring.'}`;
     case 'VISAGA TOPSHIRILDI':
       return 'Hujjatlaringiz elchixonaga topshirildi. Ko‘rib chiqish odatda 2 haftadan 1 oygacha davom etadi — natija chiqishi bilan xabar beramiz.';
     case 'VIZA TASDIQLANDI':

@@ -351,8 +351,7 @@ function isBoss(chatId) {
 function denyText(userId, anonymous) {
   if (anonymous) return 'Bu buyruq faqat hodimlar uchun.';
   return 'Bu buyruq faqat hodimlar uchun.\n\n'
-    + `Sizning Telegram ID: ${userId}\n`
-    + 'Ruxsat berish uchun bu ID Coolify\'da OWNER_CHAT_IDS (loyiha egasi), SUPERVISOR_CHAT_IDS yoki STAFF_CHAT_IDS ga qo\'shiladi.';
+    + `Sizning Telegram ID: ${userId}`;
 }
 
 // E'tiroz va shikoyatlar yuboriladigan guruh/topic.
@@ -688,11 +687,13 @@ async function buildBossReport() {
 
   // ---- 1. UMUMIY + STATUS bo'yicha ----
   const statusCounts = countBy(rows, DB_COL.STATUS, (v) => v.toUpperCase());
+  // "QABUL QILINDI 1/2", "TOPSHIRILD" kabi yozilishlar yagona kalitga keltiriladi
+  const normCounts = countBy(rows, DB_COL.STATUS, (v) => normalizeStatus(v).key);
   let m1 = `📊 UMUMIY HISOBOT\n\nJami talabalar: ${total} ta\n\n`;
   m1 += `━━ BOSQICHLAR (STATUS) ━━\n${formatCounts(statusCounts, total)}`;
 
   // Muhim yig'ma ko'rsatkichlar
-  const g = (key) => statusCounts[key] || 0;
+  const g = (key) => normCounts[key] || 0;
   const docReady = g('HUJJAT TAYYOR') + g('HUJJAT TO\'LIQ');
   const submitted = g('UNIVERSITY 1 TOPSHIRILDI') + g('UNIVERSITY 2 TOPSHIRILDI');
   const accepted = g('QABUL QILINDI');
@@ -700,15 +701,19 @@ async function buildBossReport() {
   const visaOk = g('VIZA TASDIQLANDI');
   const visaNo = g('VIZA RAD QILINDI');
   const cancelled = g('SHARTNOMA BEKOR QILDI') + g('MUZLATDI');
+  const visaStage = g("KONTRAKT TO'LADI") + g('KDB') + g('ELCHIXONA HUJJATLAR') + g('COA OLDI') + g('VISAGA TOPSHIRILDI');
+  const noDocs = g('HUJJATI YOQ');
 
   m1 += `\n\n━━ ASOSIY KO'RSATKICHLAR ━━\n`;
   m1 += `  Hujjati tayyor: ${docReady} ta\n`;
   m1 += `  Universitetga topshirilgan: ${submitted} ta\n`;
-  m1 += `  Qabul qilingan: ${accepted} ta\n`;
+  m1 += `  Qabul qilingan: ${accepted} ta (1-uni: ${statusCounts['QABUL QILINDI 1'] || 0}, 2-uni: ${statusCounts['QABUL QILINDI 2'] || 0})\n`;
+  m1 += `  Viza bosqichida: ${visaStage} ta\n`;
   m1 += `  Qabul qilinmagan: ${rejected} ta\n`;
   m1 += `  Viza tasdiqlangan: ${visaOk} ta\n`;
   m1 += `  Viza rad etilgan: ${visaNo} ta\n`;
-  m1 += `  Bekor/muzlatilgan: ${cancelled} ta`;
+  m1 += `  Bekor/muzlatilgan: ${cancelled} ta\n`;
+  m1 += `  Hujjati yo'q: ${noDocs} ta`;
 
   if (accepted + rejected > 0) {
     const rate = Math.round((accepted / (accepted + rejected)) * 100);
@@ -1053,12 +1058,19 @@ const STATUS_MESSAGES = {
     + 'Bu yo‘lda biz har doim yoningizdamiz! 💪',
   'QABUL QILINMADI': 'Afsuski, bu safar qabul qilinmadingiz. Mas\'ul hodimimiz siz bilan bog\'lanib, keyingi imkoniyatlarni muhokama qiladi.',
   "KONTRAKT TO'LADI": 'Kontrakt to\'lovingiz qabul qilindi. Endi viza hujjatlarini tayyorlash bosqichiga o\'tamiz.',
-  "KDB QO'YDI": 'KDB bank hisobingiz ochildi. Elchixona uchun hujjatlar tayyorlanmoqda.',
-  'COA OLDI': 'Universitetdan qabul hujjati (COA) olindi. Elchixonaga topshirishga tayyorlanmoqdamiz.',
-  'ELCHIXONA': 'Hujjatlaringiz elchixonaga topshirildi. Viza natijasini kutmoqdamiz.',
+  // Viza bosqichi tartibi: KONTRAKT TO'LADI -> KDB -> ELCHIXONA HUJJATLAR -> COA OLDI -> VISAGA TOPSHIRILDI
+  'KDB': 'KDB bosqichi bajarildi. Endi elchixona uchun hujjatlaringiz tayyorlanmoqda.',
+  'ELCHIXONA HUJJATLAR': 'Elchixona uchun hujjatlaringiz tayyor. Keyingi qadam — universitetdan taklifnoma xati (COA) olish.',
+  'COA OLDI': 'Universitetdan taklifnoma xati (COA) olindi! Bu viza uchun eng muhim hujjat. Endi hujjatlaringizni elchixonaga topshiramiz.',
+  'HUJJATI YOQ': '⏳ Hujjatlaringiz hali bizga yetib kelmadi.\n\n'
+    + 'Hujjatlar to‘liq bo‘lmaguncha ularni tayyorlash va universitetga topshirish boshlanmaydi. '
+    + 'Universitetlarning qabul muddatlari esa cheklangan — har bir kechikkan kun imkoniyatni kamaytiradi.\n\n'
+    + '👉 Hujjatlaringizni bugunoq /hujjatlar buyrug‘i orqali yuboring. Savol bo‘lsa, supervisoringizga murojaat qiling.',
   // TODO: Boss aniq matnni tayyorlaganda shu joyni yangilang.
   "VISAGA TOPSHIRILDI": 'Hujjatlaringiz elchixonaga topshirildi. Ko\'rib chiqish jarayoni odatda 2 hafta bilan 1 oy oralig\'ida davom etadi. Natija chiqishi bilan sizga xabar beramiz.',
-  'VIZA TASDIQLANDI': 'Tabriklaymiz! Vizangiz tasdiqlandi. Endi aviabilet masalasiga o\'tamiz.',
+  'VIZA TASDIQLANDI': '🎉✈️ TABRIKLAYMIZ! VIZANGIZ TASDIQLANDI!\n\n'
+    + 'Koreya sizni kutmoqda! 🇰🇷 Shuncha mehnat, kutish va hayajonlar ortda qoldi — endi orzuingiz haqiqatga aylanmoqda. ✨\n\n'
+    + 'Keyingi qadam — aviabilet va jo‘nashga tayyorgarlik. Supervisoringiz har bir qadamda yoningizda bo‘ladi. 💪',
   'VIZA RAD QILINDI': 'Afsuski, viza rad etildi. Mas\'ul hodimimiz siz bilan bog\'lanib, keyingi qadamlarni muhokama qiladi.',
   'SHARTNOMA BEKOR QILDI': 'Shartnomangiz bekor qilingan. Savollaringiz bo\'lsa, filialingizga murojaat qiling.',
   'MUZLATDI': 'Jarayoningiz vaqtincha to\'xtatilgan. Qayta boshlash uchun filialingizga murojaat qiling.',
@@ -4547,7 +4559,7 @@ async function runStatusWatchTick() {
 
       const msg = statusMessageFor(status, row);
       if (msg) {
-        const isCelebration = normalizeStatus(status).key === 'QABUL QILINDI';
+        const isCelebration = ['QABUL QILINDI', 'VIZA TASDIQLANDI'].includes(normalizeStatus(status).key);
         await sendMessage(chatId, isCelebration ? msg : `📢 Holatingiz yangilandi:\n\n${msg}`);
         console.log(`Status xabari yuborildi: ${contractId} -> ${status}`);
       }
@@ -4645,7 +4657,7 @@ async function buildDailySummary() {
   // Faol bosqichdagi talabalar (jarayoni davom etayotganlar)
   const ACTIVE_STATUSES = [
     "TO'LOV QILDI", "HUJJAT YIG'ILMOQDA", "HUJJAT TO'LIQ", 'HUJJAT TAYYOR',
-    "KONTRAKT TO'LADI", "KDB QO'YDI", 'COA OLDI',
+    "KONTRAKT TO'LADI", 'KDB', 'ELCHIXONA HUJJATLAR', 'COA OLDI', 'HUJJATI YOQ',
   ];
 
   const stalled = [];   // uzoq vaqt harakatsiz
@@ -4661,7 +4673,7 @@ async function buildDailySummary() {
 
     if (payment === 'NOT PAID') notPaid.push(`${id} — ${name} (${branch})`);
 
-    if (!ACTIVE_STATUSES.includes(status)) continue;
+    if (!ACTIVE_STATUSES.includes(normalizeStatus(status).key)) continue;
 
     const last = activity[id];
     if (!last) {
@@ -4674,7 +4686,7 @@ async function buildDailySummary() {
     }
   }
 
-  const statusCounts = countBy(rows, DB_COL.STATUS, (v) => v.toUpperCase());
+  const statusCounts = countBy(rows, DB_COL.STATUS, (v) => normalizeStatus(v).key);
   const g = (k) => statusCounts[k] || 0;
 
   let text = `🌙 KUNLIK XULOSA — ${todayKey}\n\n`;
@@ -4686,7 +4698,9 @@ async function buildDailySummary() {
   text += `  Hujjat to'liq: ${g("HUJJAT TO'LIQ")} ta\n`;
   text += `  Hujjat tayyor: ${g('HUJJAT TAYYOR')} ta\n`;
   text += `  Universitetda: ${g('UNIVERSITY 1 TOPSHIRILDI') + g('UNIVERSITY 2 TOPSHIRILDI')} ta\n`;
-  text += `  Elchixonada: ${g('ELCHIXONA')} ta\n`;
+  text += `  Viza bosqichida: ${g("KONTRAKT TO'LADI") + g('KDB') + g('ELCHIXONA HUJJATLAR') + g('COA OLDI')} ta\n`;
+  text += `  Elchixonada (viza kutilmoqda): ${g('VISAGA TOPSHIRILDI')} ta\n`;
+  text += `  Hujjati yo'q: ${g('HUJJATI YOQ')} ta\n`;
 
   if (stalled.length > 0) {
     text += `\n⚠️ ${STALLED_DAYS}+ KUN HARAKATSIZ (${stalled.length} ta)\n`;
@@ -4908,11 +4922,12 @@ async function runPreConfirmReminderTick() {
 
 // =====================================================================
 // SHAXSIY PDF HISOBOT (profileReport.js) — har 10 kunda + status
-// o'zgarganda. Xavfsizlik uchun AVTOMATIK yuborish faqat Coolify'da
-// PROFILE_AUTO_SEND=1 qo'yilganda yoqiladi. Unga qadar /profil ID
-// buyrug'i bilan oldindan ko'rib, tekshirib olinadi.
+// o'zgarganda. AVTOMATIK yuborish standart holatda YOQILGAN; Coolify'da
+// PROFILE_AUTO_SEND=0 qo'yilsa to'xtaydi. /profil ID buyrug'i bilan
+// istalgan talabaning hisobotini oldindan ko'rish mumkin.
 // =====================================================================
-const PROFILE_AUTO_SEND = process.env.PROFILE_AUTO_SEND === '1';
+// Standart holatda YOQILGAN. Favqulodda to'xtatish uchun: PROFILE_AUTO_SEND=0
+const PROFILE_AUTO_SEND = process.env.PROFILE_AUTO_SEND !== '0';
 
 /** Sahifa (tab) yo'q bo'lsa — yaratadi va sarlavha qatorini yozadi. */
 async function ensureSheet(title, headers) {
